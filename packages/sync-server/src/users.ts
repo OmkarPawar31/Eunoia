@@ -87,9 +87,7 @@ export class MemoryUserStore implements UserStore {
     return toPublicUser(row);
   }
 
-  async findOrCreateOAuthUser(
-    identity: OAuthIdentity,
-  ): Promise<PublicUser> {
+  async findOrCreateOAuthUser(identity: OAuthIdentity): Promise<PublicUser> {
     const key = `${identity.provider}:${identity.subject}`;
     const linked = this.idByOAuth.get(key);
     if (linked) {
@@ -177,9 +175,7 @@ export class PrismaUserStore implements UserStore {
     }
   }
 
-  async findOrCreateOAuthUser(
-    identity: OAuthIdentity,
-  ): Promise<PublicUser> {
+  async findOrCreateOAuthUser(identity: OAuthIdentity): Promise<PublicUser> {
     const linked = await this.prisma.oAuthAccount.findUnique({
       where: {
         provider_subject: {

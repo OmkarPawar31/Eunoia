@@ -192,9 +192,7 @@ export class MemorySnapshotStore implements SnapshotStore {
       ...(updates.workspaceId !== undefined
         ? { workspaceId: updates.workspaceId }
         : {}),
-      ...(updates.folderId !== undefined
-        ? { folderId: updates.folderId }
-        : {}),
+      ...(updates.folderId !== undefined ? { folderId: updates.folderId } : {}),
       hasPassword:
         updates.passwordHash === undefined
           ? existing.hasPassword

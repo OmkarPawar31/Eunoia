@@ -72,10 +72,9 @@ export async function discoveryDocument(issuer: string): Promise<{
   jwks_uri: string;
   issuer: string;
 }> {
-  const response = await fetch(
-    `${issuer}/.well-known/openid-configuration`,
-    { signal: AbortSignal.timeout(10_000) },
-  );
+  const response = await fetch(`${issuer}/.well-known/openid-configuration`, {
+    signal: AbortSignal.timeout(10_000),
+  });
   if (!response.ok)
     throw new Error(`OIDC discovery failed (${response.status})`);
   const document = (await response.json()) as {
@@ -114,9 +113,8 @@ async function signingKey(
   kid: string | undefined,
 ): Promise<KeyObject> {
   const cached = jwksCache.get(jwksUri);
-  let keys = cached && Date.now() - cached.fetchedAt < JWKS_TTL_MS
-    ? cached.keys
-    : null;
+  let keys =
+    cached && Date.now() - cached.fetchedAt < JWKS_TTL_MS ? cached.keys : null;
   if (!keys) {
     const response = await fetch(jwksUri, {
       signal: AbortSignal.timeout(10_000),
@@ -128,9 +126,7 @@ async function signingKey(
     keys = document.keys as JwksKey[];
     jwksCache.set(jwksUri, { keys, fetchedAt: Date.now() });
   }
-  const match = kid
-    ? keys.find((key) => key.kid === kid)
-    : keys[0];
+  const match = kid ? keys.find((key) => key.kid === kid) : keys[0];
   if (!match) {
     // Key rotation: drop the cache once and retry before giving up.
     jwksCache.delete(jwksUri);
@@ -156,9 +152,10 @@ export async function verifyIdToken(
   const parts = idToken.split(".");
   if (parts.length !== 3) throw new Error("Malformed ID token");
   const [headerB64, payloadB64, sigB64] = parts;
-  const header = JSON.parse(
-    base64UrlDecode(headerB64).toString("utf8"),
-  ) as { alg?: unknown; kid?: unknown };
+  const header = JSON.parse(base64UrlDecode(headerB64).toString("utf8")) as {
+    alg?: unknown;
+    kid?: unknown;
+  };
   if (header.alg !== "RS256") throw new Error("Unexpected ID token alg");
   const keyObject = await signingKey(
     discovery.jwks_uri,
@@ -169,9 +166,7 @@ export async function verifyIdToken(
   const signature = base64UrlDecode(sigB64);
   if (!verifier.verify(keyObject, signature))
     throw new Error("Invalid ID token signature");
-  const payload = JSON.parse(
-    base64UrlDecode(payloadB64).toString("utf8"),
-  ) as {
+  const payload = JSON.parse(base64UrlDecode(payloadB64).toString("utf8")) as {
     iss?: unknown;
     aud?: unknown;
     exp?: unknown;

@@ -422,9 +422,6 @@ export async function handleBillingWebhook(
  * Signs a raw webhook body the same way Razorpay does (HMAC-SHA256 hex).
  * Useful in tests to simulate realistic webhook calls.
  */
-export function signWebhookBody(
-  rawBody: Uint8Array,
-  secret: string,
-): string {
+export function signWebhookBody(rawBody: Uint8Array, secret: string): string {
   return createHmac("sha256", secret).update(rawBody).digest("hex");
 }

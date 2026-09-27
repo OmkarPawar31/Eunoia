@@ -11,9 +11,9 @@ import { MemorySnapshotStore } from "../src/RoomLoader.js";
 
 describe("extractD2", () => {
   test("pulls the fenced block out of chat output", () => {
-    expect(
-      extractD2('Here you go:\n```d2\na -> b\n```\nEnjoy!'),
-    ).toBe("a -> b");
+    expect(extractD2("Here you go:\n```d2\na -> b\n```\nEnjoy!")).toBe(
+      "a -> b",
+    );
   });
 
   test("accepts unfenced code directly", () => {
@@ -51,10 +51,10 @@ describe("POST /api/ai/generate", () => {
   let originalFetch: typeof fetch;
 
   const completion = (d2: string) =>
-    new Response(
-      JSON.stringify({ choices: [{ message: { content: d2 } }] }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    );
+    new Response(JSON.stringify({ choices: [{ message: { content: d2 } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
 
   beforeEach(async () => {
     originalFetch = globalThis.fetch;
@@ -119,9 +119,9 @@ describe("POST /api/ai/generate", () => {
     globalThis.fetch = (async (url: unknown, init?: unknown) => {
       const target = String(url);
       if (target.includes("/chat/completions")) {
-        const payload = JSON.parse(
-          (init as { body: string }).body,
-        ) as { model: string };
+        const payload = JSON.parse((init as { body: string }).body) as {
+          model: string;
+        };
         expect(payload.model).toBe("test-model");
         return completion("```d2\nweb -> db\n```");
       }

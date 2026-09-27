@@ -21,9 +21,7 @@ describe("MemoryAuditStore", () => {
     });
 
     expect((await store.listEvents()).length).toBe(3);
-    expect(
-      (await store.listEvents({ workspaceId: "w1" })).length,
-    ).toBe(2);
+    expect((await store.listEvents({ workspaceId: "w1" })).length).toBe(2);
     expect((await store.listEvents({ actorId: "u2" })).length).toBe(1);
     expect((await store.listEvents({ limit: 1 })).length).toBe(1);
     // Newest first.
@@ -149,8 +147,7 @@ describe("GET /api/audit", () => {
     };
     expect(
       body.events.some(
-        (event) =>
-          event.action === "room.delete" && event.target === room.id,
+        (event) => event.action === "room.delete" && event.target === room.id,
       ),
     ).toBe(true);
   });

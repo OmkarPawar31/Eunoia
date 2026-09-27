@@ -1,10 +1,4 @@
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  test,
-} from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createSign, generateKeyPairSync } from "node:crypto";
 import {
   newCodeVerifier,
@@ -123,7 +117,11 @@ describe("ID token verification", () => {
   });
 
   test("accepts a valid Google-style token", async () => {
-    const identity = await verifyIdToken(OIDC, DISCOVERY, signJwt(validClaims()));
+    const identity = await verifyIdToken(
+      OIDC,
+      DISCOVERY,
+      signJwt(validClaims()),
+    );
     expect(identity).toMatchObject({
       subject: "google-sub-1",
       email: "sso@example.com",

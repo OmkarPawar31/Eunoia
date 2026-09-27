@@ -204,9 +204,7 @@ describe("Billing Unit & Integration Tests", () => {
       );
       const event = provider.parseEvent(body);
       expect(event.type).toBe("subscription.charged");
-      expect(event.eventId).toBe(
-        "subscription.charged:sub_test_1:1700000042",
-      );
+      expect(event.eventId).toBe("subscription.charged:sub_test_1:1700000042");
       expect(event.userId).toBe("user_7");
       expect(event.customerId).toBe("cus_test_1");
       expect(event.subscriptionId).toBe("sub_test_1");
