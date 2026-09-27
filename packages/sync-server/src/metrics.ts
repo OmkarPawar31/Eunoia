@@ -47,6 +47,7 @@ export function groupRoute(method: string, pathname: string): string {
     return `${upper} /api/rooms/:roomId`;
   if (pathname === '/api/compile') return 'POST /api/compile';
   if (pathname === '/api/ai/generate') return 'POST /api/ai/generate';
+  if (pathname === '/api/ai/models') return 'GET /api/ai/models';
   if (pathname === '/api/auth/register') return 'POST /api/auth/register';
   if (pathname === '/api/auth/login') return 'POST /api/auth/login';
   if (pathname === '/api/auth/me') return 'GET /api/auth/me';

@@ -9,6 +9,34 @@ export const AI_QUOTA: Record<Tier, number> = {
   ENTERPRISE: 2000,
 };
 
+/** Curated model suggestions for the frontend picker. The provider is any
+ * OpenAI-compatible endpoint, so callers may still request other model ids
+ * (custom deployments, proxies); this list only drives the UI. */
+export const FALLBACK_AI_MODELS = [
+  "gpt-4o-mini",
+  "gpt-4o",
+  "o4-mini",
+  "gpt-4.1-mini",
+] as const;
+
+export const DEFAULT_AI_MODEL = FALLBACK_AI_MODELS[0];
+
+/** Resolve the advertised model list: explicit `AI_MODELS` allowlist wins,
+ * otherwise the curated fallback. The configured default (`AI_MODEL`) is
+ * always included first so the picker can select it. */
+export function listAiModels(config: Config): {
+  models: string[];
+  default: string;
+} {
+  const fallback = config.aiModel?.trim() || DEFAULT_AI_MODEL;
+  const configured = (config.aiModels ?? [])
+    .map((m) => m.trim())
+    .filter((m) => m.length > 0);
+  const models = configured.length > 0 ? configured : [...FALLBACK_AI_MODELS];
+  if (!models.includes(fallback)) models.unshift(fallback);
+  return { models, default: fallback };
+}
+
 export type AiGenerateResult = {
   d2: string;
   model: string;
@@ -87,7 +115,7 @@ export async function generateD2(
   if (!trimmed) throw new Error("Prompt must not be empty");
   if (trimmed.length > MAX_PROMPT_CHARS)
     throw new Error("Prompt exceeds the 4000 character limit");
-  const useModel = model?.trim() || config.aiModel || "gpt-4o-mini";
+  const useModel = model?.trim() || config.aiModel || DEFAULT_AI_MODEL;
   const baseUrl = (config.aiApiBaseUrl ?? "https://api.openai.com/v1").replace(
     /\/+$/,
     "",

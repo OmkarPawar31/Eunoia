@@ -27,6 +27,7 @@ const envSchema = z.object({
   AI_API_KEY: z.string().optional(),
   AI_API_BASE_URL: z.string().url().optional(),
   AI_MODEL: z.string().optional(),
+  AI_MODELS: z.string().optional(),
   OIDC_ISSUER: z.string().url().optional(),
   OIDC_CLIENT_ID: z.string().optional(),
   OIDC_CLIENT_SECRET: z.string().optional(),
@@ -68,6 +69,8 @@ export type Config = {
   aiApiKey?: string;
   aiApiBaseUrl?: string;
   aiModel?: string;
+  /** Optional comma-separated allowlist advertising picker models. */
+  aiModels?: string[];
   oidcIssuer?: string;
   oidcClientId?: string;
   oidcClientSecret?: string;
@@ -166,6 +169,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     aiApiKey: parsed.AI_API_KEY,
     aiApiBaseUrl: parsed.AI_API_BASE_URL,
     aiModel: parsed.AI_MODEL,
+    aiModels: parsed.AI_MODELS
+      ? parsed.AI_MODELS.split(",")
+          .map((m) => m.trim())
+          .filter((m) => m.length > 0)
+      : undefined,
     oidcIssuer: parsed.OIDC_ISSUER,
     oidcClientId: parsed.OIDC_CLIENT_ID,
     oidcClientSecret: parsed.OIDC_CLIENT_SECRET,

@@ -1,8 +1,12 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import Editor, { type Monaco } from '@monaco-editor/react';
+import Editor, {
+  type Monaco,
+  type OnMount,
+} from '@monaco-editor/react';
 import { registerD2Language } from './d2Language';
+import type { D2Diagnostic } from '@/lib/whiteboard/d2-diagnostics';
 
 interface D2EditorProps {
   /** Current D2 source code */
@@ -11,6 +15,8 @@ interface D2EditorProps {
   onChange: (value: string) => void;
   /** Lock the editor for read-only viewing */
   readOnly?: boolean;
+  /** Compile diagnostics rendered as inline Monaco markers. */
+  diagnostics?: D2Diagnostic[];
 }
 
 /**
@@ -21,9 +27,12 @@ export const D2Editor: React.FC<D2EditorProps> = ({
   value,
   onChange,
   readOnly = false,
+  diagnostics = [],
 }) => {
   const [failed, setFailed] = useState(false);
   const mountedRef = useRef(false);
+  const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+  const monacoRef = useRef<Monaco | null>(null);
 
   // If the Monaco CDN never delivers, the spinner would show forever:
   // degrade to an error with a retry after a grace period.
@@ -44,6 +53,49 @@ export const D2Editor: React.FC<D2EditorProps> = ({
     },
     [onChange],
   );
+
+  const handleMount: OnMount = useCallback(
+    (editor, monaco) => {
+      mountedRef.current = true;
+      editorRef.current = editor;
+      monacoRef.current = monaco;
+      // beforeMount should have registered everything, but if the
+      // theme is missing (CDN hiccup, HMR), retry registration instead
+      // of rendering an unthemed editor.
+      try {
+        registerD2Language(monaco);
+      } catch {
+        setFailed(true);
+      }
+    },
+    [],
+  );
+
+  // Inline compile diagnostics: compiler `line:col` failures become gutter
+  // markers + squiggles so errors are visible without leaving the editor.
+  useEffect(() => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!editor || !monaco) return;
+    const model = editor.getModel();
+    if (!model) return;
+    const markers = diagnostics.map((diagnostic) => ({
+      severity:
+        diagnostic.severity === 'warning'
+          ? monaco.MarkerSeverity.Warning
+          : monaco.MarkerSeverity.Error,
+      message: diagnostic.message,
+      startLineNumber: diagnostic.line,
+      startColumn: diagnostic.column,
+      endLineNumber: diagnostic.line,
+      // Underline to end-of-line when the error length is unknown.
+      endColumn: Math.max(
+        diagnostic.column + 1,
+        model.getLineMaxColumn(diagnostic.line),
+      ),
+    }));
+    monaco.editor.setModelMarkers(model, 'd2-compile', markers);
+  }, [diagnostics, value]);
 
   if (failed) {
     return (
@@ -107,17 +159,7 @@ export const D2Editor: React.FC<D2EditorProps> = ({
         value={value}
         onChange={handleChange}
         beforeMount={handleBeforeMount}
-        onMount={(_, monaco) => {
-          mountedRef.current = true;
-          // beforeMount should have registered everything, but if the
-          // theme is missing (CDN hiccup, HMR), retry registration instead
-          // of rendering an unthemed editor.
-          try {
-            registerD2Language(monaco);
-          } catch {
-            setFailed(true);
-          }
-        }}
+        onMount={handleMount}
         loading={
           <div
             style={{

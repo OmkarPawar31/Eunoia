@@ -9,7 +9,7 @@ export type BoardNode = {
   width: number;
   height: number;
   tone: 'violet' | 'orange' | 'blue' | 'yellow' | 'mint' | 'note';
-  shape?: 'round' | 'cylinder' | 'note' | 'ellipse' | 'text' | 'image';
+  shape?: 'round' | 'cylinder' | 'note' | 'ellipse' | 'text' | 'image' | 'diamond' | 'line';
   href?: string;
   /** Server-side image record id (R2 uploads). Used to refresh/delete. */
   imageId?: string;
@@ -21,6 +21,8 @@ export type BoardNode = {
   fontSize?: number;
   /** Clockwise rotation in degrees, normalized to [0, 360). Defaults to 0. */
   rotation?: number;
+  /** Global paint order across nodes/arrows/strokes. Defaults to 0. */
+  z?: number;
 };
 
 export type ArrowRouting = 'straight' | 'orthogonal' | 'curved';
@@ -33,6 +35,8 @@ export type BoardArrow = {
   startNodeId?: string;
   endNodeId?: string;
   routing?: ArrowRouting;
+  /** Global paint order across nodes/arrows/strokes. Defaults to 0. */
+  z?: number;
 };
 
 export type InkPoint = Point & {
@@ -49,4 +53,6 @@ export type BoardStroke = {
   /** perfect-freehand thinning factor in [-1, 1]. Defaults to 0.5. */
   thinning?: number;
   opacity?: number;
+  /** Global paint order across nodes/arrows/strokes. Defaults to 0. */
+  z?: number;
 };

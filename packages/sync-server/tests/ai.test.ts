@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   AI_QUOTA,
   currentMonth,
+  DEFAULT_AI_MODEL,
   extractD2,
+  listAiModels,
   MemoryAiUsageStore,
 } from "../src/ai.js";
 import { loadConfig } from "../src/config.js";
@@ -42,6 +44,95 @@ describe("AI quota accounting", () => {
 
   test("currentMonth is UTC YYYY-MM", () => {
     expect(currentMonth(new Date(Date.UTC(2026, 0, 15)))).toBe("2026-01");
+  });
+});
+
+describe("listAiModels", () => {
+  test("falls back to curated defaults", () => {
+    const listed = listAiModels(loadConfig({ NODE_ENV: "test" }));
+    expect(listed.default).toBe(DEFAULT_AI_MODEL);
+    expect(listed.models).toContain(DEFAULT_AI_MODEL);
+    expect(listed.models.length).toBeGreaterThan(1);
+  });
+
+  test("honors AI_MODELS allowlist and keeps the default selectable", () => {
+    const listed = listAiModels(
+      loadConfig({
+        NODE_ENV: "test",
+        AI_MODELS: "team-model-a, team-model-b",
+        AI_MODEL: "house-model",
+      }),
+    );
+    expect(listed.models).toEqual([
+      "house-model",
+      "team-model-a",
+      "team-model-b",
+    ]);
+    expect(listed.default).toBe("house-model");
+  });
+});
+
+describe("GET /api/ai/models", () => {
+  test("advertises picker models without auth", async () => {
+    const app = createSyncServer(
+      loadConfig({
+        NODE_ENV: "test",
+        ROOM_TICKET_SECRET: "test-secret-32-chars-long-secret!!",
+        AI_API_KEY: "test-ai-key",
+        AI_MODELS: "picker-a, picker-b",
+      }),
+      new MemorySnapshotStore(),
+    );
+    await new Promise<void>((resolve) =>
+      app.server.listen(0, "127.0.0.1", resolve),
+    );
+    try {
+      const address = app.server.address();
+      if (!address || typeof address === "string")
+        throw new Error("Server did not bind");
+      const res = await fetch(
+        `http://127.0.0.1:${address.port}/api/ai/models`,
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        models: string[];
+        default: string;
+        configured: boolean;
+      };
+      expect(body.models).toContain("picker-a");
+      expect(body.models).toContain("picker-b");
+      expect(body.models).toContain(body.default);
+      expect(body.configured).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test("reports unconfigured servers so the picker can hint setup", async () => {
+    const app = createSyncServer(
+      loadConfig({
+        NODE_ENV: "test",
+        ROOM_TICKET_SECRET: "test-secret-32-chars-long-secret!!",
+      }),
+      new MemorySnapshotStore(),
+    );
+    await new Promise<void>((resolve) =>
+      app.server.listen(0, "127.0.0.1", resolve),
+    );
+    try {
+      const address = app.server.address();
+      if (!address || typeof address === "string")
+        throw new Error("Server did not bind");
+      const res = await fetch(
+        `http://127.0.0.1:${address.port}/api/ai/models`,
+      );
+      expect(res.status).toBe(200);
+      expect(
+        ((await res.json()) as { configured: boolean }).configured,
+      ).toBe(false);
+    } finally {
+      await app.close();
+    }
   });
 });
 

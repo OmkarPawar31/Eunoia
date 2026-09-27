@@ -6,6 +6,7 @@ import {
   AI_QUOTA,
   currentMonth,
   generateD2,
+  listAiModels,
   type AiUsageStore,
 } from "../ai.js";
 import {
@@ -1046,6 +1047,16 @@ export function createApiApp(
             code: "D2_COMPILER_UNAVAILABLE",
           };
         }
+      })
+      .get("/api/ai/models", () => {
+        // Public (no auth): advertises picker choices + server default.
+        // Generation itself still requires auth + quota at POST.
+        const { models, default: defaultModel } = listAiModels(config);
+        return {
+          models,
+          default: defaultModel,
+          configured: config.aiApiKey !== undefined,
+        };
       })
       .post("/api/ai/generate", async ({ body, headers, query, set }) => {
         if (!config.aiApiKey) {

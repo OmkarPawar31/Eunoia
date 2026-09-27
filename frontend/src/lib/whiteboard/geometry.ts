@@ -114,6 +114,103 @@ export function snapPoint(point: Point, gridSize = 8): Point {
   };
 }
 
+/** Default magnetic snap radius in world units for port snapping. */
+export const PORT_SNAP_RADIUS = 18;
+
+export type NodePort = {
+  /** Stable port id within the node (`n`, `e`, `s`, `w`, `ne`, …). */
+  id: string;
+  x: number;
+  y: number;
+};
+
+/** Minimal node-like shape for port computation (avoids a board-types import). */
+export type PortNode = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  shape?: string;
+  rotation?: number;
+};
+
+/**
+ * Magnetic connection ports for a node. Rectangles expose 8 ports
+ * (midpoints + corners); ellipses/diamonds expose the 4 cardinal points;
+ * `line` dividers expose their two ends; everything else falls back to
+ * the 4 midpoints. Ports rotate with the node.
+ */
+export function getNodePorts(node: PortNode): NodePort[] {
+  const cx = node.x + node.width / 2;
+  const cy = node.y + node.height / 2;
+  const hw = node.width / 2;
+  const hh = node.height / 2;
+  let ports: NodePort[];
+  if (node.shape === 'line') {
+    ports = [
+      { id: 'w', x: node.x, y: cy },
+      { id: 'e', x: node.x + node.width, y: cy },
+    ];
+  } else {
+    const cardinals: NodePort[] = [
+      { id: 'n', x: cx, y: cy - hh },
+      { id: 'e', x: cx + hw, y: cy },
+      { id: 's', x: cx, y: cy + hh },
+      { id: 'w', x: cx - hw, y: cy },
+    ];
+    if (node.shape === 'ellipse' || node.shape === 'diamond') {
+      ports = cardinals;
+    } else {
+      ports = [
+        ...cardinals,
+        { id: 'ne', x: cx + hw, y: cy - hh },
+        { id: 'se', x: cx + hw, y: cy + hh },
+        { id: 'sw', x: cx - hw, y: cy + hh },
+        { id: 'nw', x: cx - hw, y: cy - hh },
+      ];
+    }
+  }
+  const rotation = normalizeRotation(node.rotation ?? 0);
+  if (rotation === 0) return ports;
+  const center = { x: cx, y: cy };
+  const angleRad = degToRad(rotation);
+  return ports.map((port) => ({
+    ...port,
+    ...rotatePoint(port, center, angleRad),
+  }));
+}
+
+export type PortSnapHit<T extends { id: string } = { id: string }> = {
+  node: T;
+  port: NodePort;
+  distance: number;
+};
+
+/**
+ * Magnetic snap: nearest node port within `radius` world units of `point`.
+ * Optionally excludes one node (e.g. the node an arrow starts from is still
+ * eligible — exclusion is for the element being created, which has no id
+ * yet, so it defaults to no exclusion).
+ */
+export function nearestPort<T extends PortNode & { id: string }>(
+  point: Point,
+  nodes: T[],
+  radius = PORT_SNAP_RADIUS,
+  excludeId?: string,
+): PortSnapHit<T> | null {
+  let best: PortSnapHit<T> | null = null;
+  for (const node of nodes) {
+    if (excludeId !== undefined && node.id === excludeId) continue;
+    for (const port of getNodePorts(node)) {
+      const distance = Math.hypot(point.x - port.x, point.y - port.y);
+      if (distance <= radius && (!best || distance < best.distance)) {
+        best = { node, port, distance };
+      }
+    }
+  }
+  return best;
+}
+
 export function aabbFromRect(
   x: number,
   y: number,
