@@ -50,6 +50,30 @@ export function groupRoute(method: string, pathname: string): string {
   if (pathname === '/api/auth/register') return 'POST /api/auth/register';
   if (pathname === '/api/auth/login') return 'POST /api/auth/login';
   if (pathname === '/api/auth/me') return 'GET /api/auth/me';
+  if (pathname === '/api/auth/sso/start') return 'GET /api/auth/sso/start';
+  if (pathname === '/api/auth/sso/callback')
+    return 'GET /api/auth/sso/callback';
+  if (pathname === '/api/workspaces' && upper !== 'GET')
+    return `${upper} /api/workspaces`;
+  if (pathname === '/api/workspaces') return 'GET /api/workspaces';
+  if (/^\/api\/workspaces\/[^/]+\/folders$/.test(pathname))
+    return 'POST /api/workspaces/:id/folders';
+  if (/^\/api\/workspaces\/[^/]+\/members\/[^/]+$/.test(pathname))
+    return `${upper} /api/workspaces/:id/members/:userId`;
+  if (/^\/api\/workspaces\/[^/]+\/members$/.test(pathname))
+    return `${upper} /api/workspaces/:id/members`;
+  if (/^\/api\/workspaces\/[^/]+$/.test(pathname))
+    return `${upper} /api/workspaces/:id`;
+  if (/^\/api\/rooms\/[^/]+\/move$/.test(pathname))
+    return 'POST /api/rooms/:roomId/move';
+  if (pathname === '/api/rooms' && upper === 'GET') return 'GET /api/rooms';
+  if (pathname === '/api/audit') return 'GET /api/audit';
+  if (pathname === '/api/billing/prices') return 'GET /api/billing/prices';
+  if (pathname === '/api/billing/checkout') return 'POST /api/billing/checkout';
+  if (pathname === '/api/billing/cancel') return 'POST /api/billing/cancel';
+  if (pathname === '/api/billing/subscription')
+    return 'GET /api/billing/subscription';
+  if (pathname === '/api/billing/webhook') return 'POST /api/billing/webhook';
   return 'OTHER';
 }
 
@@ -62,6 +86,15 @@ export type MetricsGauges = {
 export class Metrics {
   private readonly http = new Map<string, number>();
   private readonly compiles = new Map<string, number>();
+  private readonly compileDurations = new Map<
+    string,
+    { sum: number; count: number }
+  >();
+  private readonly snapshotFlushes = new Map<string, number>();
+  private readonly snapshotDurations = new Map<
+    string,
+    { sum: number; count: number }
+  >();
   private readonly aiGenerations = new Map<string, number>();
   private readonly wsUpgrades = new Map<string, number>();
 
@@ -73,6 +106,28 @@ export class Metrics {
   incCompile(engine: string, outcome: string): void {
     const key = `${engine}|${outcome}`;
     this.compiles.set(key, (this.compiles.get(key) ?? 0) + 1);
+  }
+
+  observeCompileDuration(engine: string, durationMs: number): void {
+    const entry = this.compileDurations.get(engine) ?? { sum: 0, count: 0 };
+    entry.sum += durationMs;
+    entry.count += 1;
+    this.compileDurations.set(engine, entry);
+  }
+
+  /**
+   * NFR-7 durability signal. Call once per debounced flush / pre-evict
+   * final write (see SnapshotWorker). `outcome` is "success" or "error".
+   */
+  incSnapshot(outcome: string, durationMs: number): void {
+    this.snapshotFlushes.set(
+      outcome,
+      (this.snapshotFlushes.get(outcome) ?? 0) + 1,
+    );
+    const entry = this.snapshotDurations.get(outcome) ?? { sum: 0, count: 0 };
+    entry.sum += durationMs;
+    entry.count += 1;
+    this.snapshotDurations.set(outcome, entry);
   }
 
   incAi(outcome: string): void {
@@ -107,6 +162,53 @@ export class Metrics {
       const outcome = key.slice(separator + 1);
       lines.push(
         `eunoia_compile_requests_total{engine="${engine}",outcome="${outcome}"} ${count}`,
+      );
+    }
+    lines.push(
+      '# HELP eunoia_compile_duration_ms_sum Total D2 compile time by engine.',
+      '# TYPE eunoia_compile_duration_ms_sum counter',
+    );
+    for (const [engine, entry] of [...this.compileDurations.entries()].sort()) {
+      lines.push(
+        `eunoia_compile_duration_ms_sum{engine="${engine}"} ${Math.round(entry.sum)}`,
+      );
+    }
+    lines.push(
+      '# HELP eunoia_compile_duration_ms_count D2 compile request count by engine.',
+      '# TYPE eunoia_compile_duration_ms_count counter',
+    );
+    for (const [engine, entry] of [...this.compileDurations.entries()].sort()) {
+      lines.push(
+        `eunoia_compile_duration_ms_count{engine="${engine}"} ${entry.count}`,
+      );
+    }
+    lines.push(
+      '# HELP eunoia_snapshot_flush_total Snapshot flushes by outcome (NFR-7 durability).',
+      '# TYPE eunoia_snapshot_flush_total counter',
+    );
+    for (const [outcome, count] of [...this.snapshotFlushes.entries()].sort()) {
+      lines.push(`eunoia_snapshot_flush_total{outcome="${outcome}"} ${count}`);
+    }
+    lines.push(
+      '# HELP eunoia_snapshot_flush_duration_ms_sum Total snapshot flush time by outcome.',
+      '# TYPE eunoia_snapshot_flush_duration_ms_sum counter',
+    );
+    for (const [outcome, entry] of [
+      ...this.snapshotDurations.entries(),
+    ].sort()) {
+      lines.push(
+        `eunoia_snapshot_flush_duration_ms_sum{outcome="${outcome}"} ${Math.round(entry.sum)}`,
+      );
+    }
+    lines.push(
+      '# HELP eunoia_snapshot_flush_duration_ms_count Snapshot flush count by outcome.',
+      '# TYPE eunoia_snapshot_flush_duration_ms_count counter',
+    );
+    for (const [outcome, entry] of [
+      ...this.snapshotDurations.entries(),
+    ].sort()) {
+      lines.push(
+        `eunoia_snapshot_flush_duration_ms_count{outcome="${outcome}"} ${entry.count}`,
       );
     }
     lines.push(

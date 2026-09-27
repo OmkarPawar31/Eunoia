@@ -1,20 +1,21 @@
 /**
- * Culling benchmark: custom grid SpatialIndex vs rbush vs brute force.
+ * Culling benchmark: rbush-backed SpatialIndex rebuild + viewport search.
  *
- * Run with: `bun benchmarks/culling.bench.ts` from `frontend/`.
+ * Run with: `bun run bench` (or `bun benchmarks/culling.bench.ts`) from `frontend/`.
  *
- * Measures index rebuild + viewport search across corpus sizes and zoom
- * levels so index changes (cell size, rbush adoption) are decided by
- * numbers, not intuition. CI gate guidance (PRD §5.1): 60 FPS pan/zoom
- * at 3,000+ shapes; investigate when p50 search exceeds ~2ms or rebuild
- * exceeds ~8ms at 3k.
+ * CI gate (PRD §5.1, NFR-1: 60 FPS pan/zoom at 3,000+ shapes): at N=3000,
+ * p50-ish search must stay under ~2ms and rebuild under ~8ms. Breaches set
+ * a non-zero exit code so CI fails.
  */
 
-import RBush from 'rbush';
 import { SpatialIndex } from '../src/lib/whiteboard/spatial-index';
 import type { Aabb } from '../src/lib/whiteboard/geometry';
 
 type Entry = Aabb & { id: string };
+
+const SEARCH_BUDGET_MS = 2;
+const REBUILD_BUDGET_MS = 8;
+const GATE_SIZE = 3000;
 
 function mulberry32(seed: number): () => number {
   let state = seed >>> 0;
@@ -79,62 +80,64 @@ function bench(
   return { name, avgMs: total / iterations, hits };
 }
 
-function runCorpus(size: number): void {
+function runCorpus(size: number): { rebuildMs: number; searchMs: number } {
   const corpus = generateCorpus(size, 42);
   console.log(`\n=== corpus N=${size} ===`);
 
-  // Grid index (current implementation).
-  const grid = new SpatialIndex<Entry>();
-  const gridBuild = bench('grid rebuild', 10, () => {
-    grid.rebuild(corpus.map((e) => ({ ...e, value: e })));
+  const index = new SpatialIndex<Entry>();
+  const rebuild = bench('rebuild', 10, () => {
+    index.rebuild(corpus.map((e) => ({ ...e, value: e })));
     return 0;
   });
-  grid.rebuild(corpus.map((e) => ({ ...e, value: e })));
+  index.rebuild(corpus.map((e) => ({ ...e, value: e })));
 
-  // rbush bulk load.
-  let tree = new RBush<Entry>();
-  const rbushBuild = bench('rbush bulk-load', 10, () => {
-    tree = new RBush<Entry>();
-    tree.load(corpus);
-    return 0;
-  });
-  tree = new RBush<Entry>();
-  tree.load(corpus);
+  console.log(`  build: rebuild=${rebuild.avgMs.toFixed(2)}ms`);
 
-  console.log(
-    `  build: grid=${gridBuild.avgMs.toFixed(2)}ms rbush=${rbushBuild.avgMs.toFixed(2)}ms`,
-  );
-
+  let worstSearch = 0;
   for (const viewport of VIEWPORTS) {
-    // Correctness: single-run counts must agree.
-    const gridCount = grid.search(viewport.bounds).length;
-    const rbushCount = tree.search(viewport.bounds).length;
+    // Correctness: index counts must agree with brute force.
+    const indexCount = index.search(viewport.bounds).length;
     let bruteCount = 0;
     for (const e of corpus) if (intersects(e, viewport.bounds)) bruteCount++;
-    if (gridCount !== rbushCount || gridCount !== bruteCount) {
+    if (indexCount !== bruteCount) {
       console.error(
-        `  MISMATCH ${viewport.name}: grid=${gridCount} rbush=${rbushCount} brute=${bruteCount}`,
+        `  MISMATCH ${viewport.name}: index=${indexCount} brute=${bruteCount}`,
       );
       process.exitCode = 1;
     }
-    const gridSearch = bench(`grid search ${viewport.name}`, 50, () => {
-      return grid.search(viewport.bounds).length;
+    const search = bench(`search ${viewport.name}`, 50, () => {
+      return index.search(viewport.bounds).length;
     });
-    const rbushSearch = bench(`rbush search ${viewport.name}`, 50, () => {
-      return tree.search(viewport.bounds).length;
-    });
-    const bruteSearch = bench(`brute-force ${viewport.name}`, 10, () => {
+    const brute = bench(`brute-force ${viewport.name}`, 10, () => {
       let count = 0;
       for (const e of corpus) if (intersects(e, viewport.bounds)) count++;
       return count;
     });
+    worstSearch = Math.max(worstSearch, search.avgMs);
     console.log(
-      `  search ${viewport.name}: grid=${gridSearch.avgMs.toFixed(3)}ms rbush=${rbushSearch.avgMs.toFixed(3)}ms brute=${bruteSearch.avgMs.toFixed(3)}ms (${gridCount} visible)`,
+      `  search ${viewport.name}: index=${search.avgMs.toFixed(3)}ms brute=${brute.avgMs.toFixed(3)}ms (${indexCount} visible)`,
     );
   }
+  return { rebuildMs: rebuild.avgMs, searchMs: worstSearch };
 }
 
+let failed = false;
 for (const size of [500, 3000, 5000, 10000]) {
-  runCorpus(size);
+  const { rebuildMs, searchMs } = runCorpus(size);
+  if (size === GATE_SIZE) {
+    if (searchMs > SEARCH_BUDGET_MS) {
+      console.error(
+        `GATE FAIL at N=${size}: search ${searchMs.toFixed(3)}ms exceeds ${SEARCH_BUDGET_MS}ms (NFR-1)`,
+      );
+      failed = true;
+    }
+    if (rebuildMs > REBUILD_BUDGET_MS) {
+      console.error(
+        `GATE FAIL at N=${size}: rebuild ${rebuildMs.toFixed(2)}ms exceeds ${REBUILD_BUDGET_MS}ms (NFR-1)`,
+      );
+      failed = true;
+    }
+  }
 }
+if (failed) process.exitCode = 1;
 console.log('\ndone.');

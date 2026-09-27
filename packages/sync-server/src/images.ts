@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
@@ -156,6 +157,8 @@ export interface R2Client {
    */
   getObject(key: string): Promise<ObjectBody | null>;
   delete(key: string): Promise<void>;
+  /** Bucket-reachability probe for /readyz. Throws when R2 is unreachable. */
+  probe(): Promise<void>;
 }
 
 export type R2Config = {
@@ -266,6 +269,10 @@ export class S3R2Client implements R2Client {
       new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
     );
   }
+
+  async probe(): Promise<void> {
+    await this.client.send(new HeadBucketCommand({ Bucket: this.bucket }));
+  }
 }
 
 /** True for object-absence failures (as opposed to credential/network errors). */
@@ -343,6 +350,10 @@ export class MemoryR2Client implements R2Client {
 
   async delete(key: string): Promise<void> {
     this.objects.delete(key);
+  }
+
+  async probe(): Promise<void> {
+    // In-memory fake is always reachable.
   }
 }
 

@@ -1,7 +1,14 @@
-import { randomUUID } from "node:crypto";
-import { compressSync } from "fflate";
-import * as Y from "yjs";
-import type { SnapshotStore } from "./RoomLoader.js";
+import { randomUUID } from 'node:crypto';
+import { compressSync } from 'fflate';
+import * as Y from 'yjs';
+import type { SnapshotStore } from './RoomLoader.js';
+
+export type SnapshotFlushReport = {
+  roomId: string;
+  outcome: 'success' | 'error';
+  durationMs: number;
+  bytes: number;
+};
 
 export class SnapshotWorker {
   private timer?: ReturnType<typeof setTimeout>;
@@ -12,6 +19,7 @@ export class SnapshotWorker {
     private readonly roomId: string,
     private readonly store: SnapshotStore,
     private readonly debounceMs: number,
+    private readonly onFlush?: (report: SnapshotFlushReport) => void,
   ) {}
 
   schedule(doc: Y.Doc): void {
@@ -39,18 +47,35 @@ export class SnapshotWorker {
     try {
       while (this.dirty) {
         this.dirty = false;
+        const started = Date.now();
         const state = Y.encodeStateAsUpdate(doc);
         const version = Buffer.from(Y.encodeStateVector(doc)).toString(
-          "base64url",
+          'base64url',
         );
         const compressed = compressSync(state);
-        await this.store.saveSnapshot({
-          id: randomUUID(),
-          roomId: this.roomId,
-          docVersion: version,
-          data: compressed,
-          createdAt: new Date(),
-        });
+        try {
+          await this.store.saveSnapshot({
+            id: randomUUID(),
+            roomId: this.roomId,
+            docVersion: version,
+            data: compressed,
+            createdAt: new Date(),
+          });
+          this.onFlush?.({
+            roomId: this.roomId,
+            outcome: 'success',
+            durationMs: Date.now() - started,
+            bytes: compressed.length,
+          });
+        } catch (error) {
+          this.onFlush?.({
+            roomId: this.roomId,
+            outcome: 'error',
+            durationMs: Date.now() - started,
+            bytes: compressed.length,
+          });
+          throw error;
+        }
       }
     } finally {
       this.flushPromise = undefined;

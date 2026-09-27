@@ -5,7 +5,7 @@
 - `GET /health` → `{ status, version, uptimeSec, activeRooms }`. Cheap
   liveness; used by the Docker `HEALTHCHECK` and compose.
 - `GET /readyz` → `{ status: ready|degraded|down, version, uptimeSec,
-  checks: { database, redis, compiler, imageStorage } }`. Each check is
+checks: { database, redis, compiler, imageStorage } }`. Each check is
   `ok | skipped | degraded | error` with `latencyMs`/`detail`. HTTP 503
   only when `status` is `down` (PostgreSQL configured but unreachable).
 - `GET /metrics` → Prometheus text: `eunoia_http_requests_total`,
@@ -17,19 +17,20 @@
 
 ## Triage map
 
-| Symptom | Likely cause | Check | Fix |
-| --- | --- | --- | --- |
-| `/readyz` → `down`, `database: error` | PostgreSQL down / `DATABASE_URL` wrong | `docker compose ps`; `pg_isready -U postgres -d eunoia` | Restart postgres; verify `DATABASE_URL`; server exits loudly on non-postgres URLs by design |
-| `redis: degraded` | Redis down / `REDIS_URL` wrong | `docker compose logs redis`; `redis-cli ping` | Restart redis; sync keeps working (cursor telemetry only) — not downtime |
-| `compiler: degraded` | d2-compiler down / `D2_COMPILER_URL` wrong | `curl localhost:9400/healthz`; `docker compose logs d2-compiler` | Restart d2-compiler; dev serves placeholder layouts, prod surfaces 502 with `D2_COMPILER_UNAVAILABLE` |
-| Image endpoints 503 `R2_NOT_CONFIGURED` | R2 env missing | `imageStorage: skipped` in `/readyz` | Set `R2_*` vars; uploads/bytes proxy stay 503 until then |
-| Compile 403 `TIER_UPGRADE_REQUIRED` | Expected tier gating, not an outage | `eunoia_compile_requests_total{outcome="TIER_UPGRADE_REQUIRED"}` | No action; room/user tier works as designed |
-| WS closes 4100 | Snapshot restore dropped peers (expected) | Server logs | Clients resync automatically |
-| Billing endpoints 503 `BILLING_NOT_CONFIGURED` | `RAZORPAY_KEY_ID` unset | Server boot logs | Set `RAZORPAY_KEY_ID/SECRET/WEBHOOK_SECRET/PLAN_PRO`; tiers stay DB-managed until then |
-| Webhook 401 `INVALID_SIGNATURE` spike | Rotated webhook secret or clock/replay issue | Compare dashboard endpoint secret vs `RAZORPAY_WEBHOOK_SECRET` | Update env, restart; replays are idempotent so redelivery is safe |
-| Tier stuck after cancel | `halted` status (failed renewals) is skipped by design; downgrade lands on `cancelled/completed/expired` | Subscription row status | No action until Razorpay ends the subscription; cancel is at cycle end |
-| RBI recurring notes | First mandate charge needs customer 2FA (hosted link handles it); UPI Autopay caps at ₹15,000/cycle — card mandates suit $12 plans | Razorpay dashboard | Nothing to build; pre-debit notifications + eFIRC are Razorpay-side |
-| Rising 5xx in `eunoia_http_requests_total` | App regression | `docker compose logs sync-server` (pino JSON access lines) | Roll back to last good image |
+| Symptom                                        | Likely cause                                                                                                                       | Check                                                            | Fix                                                                                                   |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `/readyz` → `down`, `database: error`          | PostgreSQL down / `DATABASE_URL` wrong                                                                                             | `docker compose ps`; `pg_isready -U postgres -d eunoia`          | Restart postgres; verify `DATABASE_URL`; server exits loudly on non-postgres URLs by design           |
+| `redis: degraded`                              | Redis down / `REDIS_URL` wrong                                                                                                     | `docker compose logs redis`; `redis-cli ping`                    | Restart redis; sync keeps working (cursor telemetry only) — not downtime                              |
+| `compiler: degraded`                           | d2-compiler down / `D2_COMPILER_URL` wrong                                                                                         | `curl localhost:9400/healthz`; `docker compose logs d2-compiler` | Restart d2-compiler; dev serves placeholder layouts, prod surfaces 502 with `D2_COMPILER_UNAVAILABLE` |
+| Image endpoints 503 `R2_NOT_CONFIGURED`        | R2 env missing                                                                                                                     | `imageStorage: skipped` in `/readyz`                             | Set `R2_*` vars; uploads/bytes proxy stay 503 until then                                              |
+| `imageStorage: degraded` in `/readyz`          | R2 configured but bucket unreachable (creds, network)                                                                              | `imageStorage.detail` in `/readyz`                               | Fix creds/network; sync + persistence keep working (degraded, never down)                             |
+| Compile 403 `TIER_UPGRADE_REQUIRED`            | Expected tier gating, not an outage                                                                                                | `eunoia_compile_requests_total{outcome="TIER_UPGRADE_REQUIRED"}` | No action; room/user tier works as designed                                                           |
+| WS closes 4100                                 | Snapshot restore dropped peers (expected)                                                                                          | Server logs                                                      | Clients resync automatically                                                                          |
+| Billing endpoints 503 `BILLING_NOT_CONFIGURED` | `RAZORPAY_KEY_ID` unset                                                                                                            | Server boot logs                                                 | Set `RAZORPAY_KEY_ID/SECRET/WEBHOOK_SECRET/PLAN_PRO`; tiers stay DB-managed until then                |
+| Webhook 401 `INVALID_SIGNATURE` spike          | Rotated webhook secret or clock/replay issue                                                                                       | Compare dashboard endpoint secret vs `RAZORPAY_WEBHOOK_SECRET`   | Update env, restart; replays are idempotent so redelivery is safe                                     |
+| Tier stuck after cancel                        | `halted` status (failed renewals) is skipped by design; downgrade lands on `cancelled/completed/expired`                           | Subscription row status                                          | No action until Razorpay ends the subscription; cancel is at cycle end                                |
+| RBI recurring notes                            | First mandate charge needs customer 2FA (hosted link handles it); UPI Autopay caps at ₹15,000/cycle — card mandates suit $12 plans | Razorpay dashboard                                               | Nothing to build; pre-debit notifications + eFIRC are Razorpay-side                                   |
+| Rising 5xx in `eunoia_http_requests_total`     | App regression                                                                                                                     | `docker compose logs sync-server` (pino JSON access lines)       | Roll back to last good image                                                                          |
 
 ## Environment knobs
 
@@ -44,7 +45,8 @@
 Point an external prober (e.g. Better Uptime, Upptime, or a Vercel cron
 hitting a third-party check) at `GET /readyz` from 2+ regions at 60s
 intervals. Alert on: unreachable, HTTP 503, or `status: "down"` for
->3 consecutive probes. `degraded` pages low-priority (business hours).
+
+> 3 consecutive probes. `degraded` pages low-priority (business hours).
 
 ## Scaling notes
 
@@ -66,9 +68,9 @@ intervals. Alert on: unreachable, HTTP 503, or `status: "down"` for
 
 ## On-call rotation (template — fill names at Pro launch)
 
-| Week (Mon–Sun) | Primary | Secondary |
-| --- | --- | --- |
-| YYYY-MM-DD | name (contact) | name (contact) |
+| Week (Mon–Sun) | Primary        | Secondary      |
+| -------------- | -------------- | -------------- |
+| YYYY-MM-DD     | name (contact) | name (contact) |
 
 - **Paging:** `down` (503 `/readyz`) or unreachable ×3 probes → page
   primary immediately. `degraded` → ticket for business hours. Rising
