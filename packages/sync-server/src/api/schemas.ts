@@ -11,7 +11,28 @@ export const GenerateDiagramSchema = z
   .object({
     prompt: z.string().trim().min(1).max(4000),
     roomId: z.string().trim().min(1).max(MAX_ROOM_ID_LENGTH).optional(),
+    // Accepted for backwards compatibility, but deliberately ignored: the
+    // fixed server model always wins (there is no client model picker).
     model: z.string().trim().min(1).max(120).optional(),
+  })
+  .strict();
+
+export const SuggestLayoutSchema = z
+  .object({
+    d2: z
+      .string()
+      .min(1)
+      .max(50_000)
+      .refine((value) => value.trim().length > 0, {
+        message: "Current D2 must not be empty",
+      }),
+    instruction: z
+      .string()
+      .trim()
+      .min(1)
+      .max(2000)
+      .default("Improve the layout of this diagram"),
+    roomId: z.string().trim().min(1).max(MAX_ROOM_ID_LENGTH).optional(),
   })
   .strict();
 

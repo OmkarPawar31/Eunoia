@@ -19,14 +19,12 @@ type D2PanelProps = {
   aiQuota: { used: number; limit: number } | null;
   jevWarnings?: string[];
   onGenerate: () => void;
-  aiModels: string[];
-  aiModel: string;
-  onSelectModel: (model: string) => void;
+  onSuggestLayout: () => void;
 };
 
 /**
- * D2 source panel: AI prompt row (with model picker) + Monaco editor +
- * layout engine + compile footer. Extracted from WhiteboardPage.
+ * D2 source panel: AI prompt row + Monaco editor + layout engine +
+ * compile footer. Extracted from WhiteboardPage.
  */
 export function D2Panel({
   code,
@@ -43,9 +41,7 @@ export function D2Panel({
   aiQuota,
   jevWarnings = [],
   onGenerate,
-  aiModels,
-  aiModel,
-  onSelectModel,
+  onSuggestLayout,
 }: D2PanelProps) {
   return (
     <aside className="code-panel" aria-label="D2 code editor">
@@ -131,42 +127,6 @@ export function D2Panel({
             }}
           />
         </div>
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-            fontSize: 12,
-            color: '#55556a',
-          }}
-        >
-          <span className="engine-picker-label">Model</span>
-          <select
-            aria-label="AI model"
-            value={aiModel}
-            disabled={aiBusy}
-            onChange={(event) => onSelectModel(event.target.value)}
-            title={
-              aiQuota
-                ? `AI quota: ${aiQuota.used}/${aiQuota.limit} this month`
-                : 'Pick the model used for generation'
-            }
-            style={{
-              maxWidth: 132,
-              borderRadius: 10,
-              border: '1px solid #e3e2ea',
-              fontSize: 12,
-              padding: '7px 6px',
-              background: '#fff',
-            }}
-          >
-            {aiModels.map((model) => (
-              <option key={model} value={model}>
-                {model}
-              </option>
-            ))}
-          </select>
-        </label>
         <button
           type="submit"
           className="compile-button"
@@ -178,6 +138,19 @@ export function D2Panel({
           }
         >
           {aiBusy ? 'Dreaming…' : 'Generate'}
+        </button>
+        <button
+          type="button"
+          className="compile-button"
+          disabled={aiBusy || !code.trim()}
+          onClick={onSuggestLayout}
+          title={
+            aiQuota
+              ? `AI quota: ${aiQuota.used}/${aiQuota.limit} this month`
+              : 'Suggest a better layout for the current diagram'
+          }
+        >
+          {aiBusy ? '…' : 'Suggest layout'}
         </button>
       </form>
       {jevWarnings.length > 0 ? (

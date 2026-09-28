@@ -1,7 +1,20 @@
 'use client';
 
-import { Ellipsis, Layers2, Minus } from 'lucide-react';
+import {
+  AlignCenterHorizontal,
+  AlignCenterVertical,
+  AlignEndHorizontal,
+  AlignEndVertical,
+  AlignHorizontalSpaceBetween,
+  AlignStartHorizontal,
+  AlignStartVertical,
+  AlignVerticalSpaceBetween,
+  Ellipsis,
+  Layers2,
+  Minus,
+} from 'lucide-react';
 import type { ArrowRouting, BoardNode } from '@/lib/whiteboard/board-types';
+import type { AlignType, DistributeAxis } from '@/lib/whiteboard/geometry';
 
 export type LayerDirection = 'forward' | 'backward' | 'front' | 'back';
 
@@ -17,6 +30,7 @@ type StylePanelProps = {
   arrowRouting: ArrowRouting;
   selectedArrowCount: number;
   selectedStrokeCount: number;
+  selectedNodeCount?: number;
   brushSize: number;
   brushThinning: number;
   onClose: () => void;
@@ -28,6 +42,11 @@ type StylePanelProps = {
   onApplyBulkOpacity: (opacity: number) => void;
   onApplyFontSize: (fontSize: number) => void;
   onMoveLayer: (direction: LayerDirection) => void;
+  onAlignNodes?: (type: AlignType) => void;
+  onDistributeNodes?: (axis: DistributeAxis) => void;
+  hasGroupedSelection?: boolean;
+  onGroupSelected?: () => void;
+  onUngroupSelected?: () => void;
   onDeleteSelected: () => void;
   onDuplicateSelected: () => void;
 };
@@ -48,6 +67,7 @@ export function StylePanel({
   arrowRouting,
   selectedArrowCount,
   selectedStrokeCount,
+  selectedNodeCount = 0,
   brushSize,
   brushThinning,
   onClose,
@@ -59,6 +79,11 @@ export function StylePanel({
   onApplyBulkOpacity,
   onApplyFontSize,
   onMoveLayer,
+  onAlignNodes,
+  onDistributeNodes,
+  hasGroupedSelection = false,
+  onGroupSelected,
+  onUngroupSelected,
   onDeleteSelected,
   onDuplicateSelected,
 }: StylePanelProps) {
@@ -422,9 +447,119 @@ export function StylePanel({
             </button>
           </div>
         </div>
+        {selectedNodeCount >= 2 && onAlignNodes && (
+          <div className="style-section">
+            <span className="style-label">Align</span>
+            <div className="style-choice-row style-choice-row--wide">
+              <button
+                className="style-choice"
+                type="button"
+                aria-label="Align left"
+                title="Align left"
+                onClick={() => onAlignNodes('left')}
+              >
+                <AlignStartHorizontal size={16} />
+              </button>
+              <button
+                className="style-choice"
+                type="button"
+                aria-label="Align center horizontal"
+                title="Align center horizontal"
+                onClick={() => onAlignNodes('center')}
+              >
+                <AlignCenterHorizontal size={16} />
+              </button>
+              <button
+                className="style-choice"
+                type="button"
+                aria-label="Align right"
+                title="Align right"
+                onClick={() => onAlignNodes('right')}
+              >
+                <AlignEndHorizontal size={16} />
+              </button>
+              <button
+                className="style-choice"
+                type="button"
+                aria-label="Align top"
+                title="Align top"
+                onClick={() => onAlignNodes('top')}
+              >
+                <AlignStartVertical size={16} />
+              </button>
+              <button
+                className="style-choice"
+                type="button"
+                aria-label="Align middle vertical"
+                title="Align middle vertical"
+                onClick={() => onAlignNodes('middle')}
+              >
+                <AlignCenterVertical size={16} />
+              </button>
+              <button
+                className="style-choice"
+                type="button"
+                aria-label="Align bottom"
+                title="Align bottom"
+                onClick={() => onAlignNodes('bottom')}
+              >
+                <AlignEndVertical size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+        {selectedNodeCount >= 3 && onDistributeNodes && (
+          <div className="style-section">
+            <span className="style-label">Distribute</span>
+            <div className="style-choice-row style-choice-row--wide">
+              <button
+                className="style-choice"
+                type="button"
+                aria-label="Distribute horizontally"
+                title="Distribute horizontally"
+                onClick={() => onDistributeNodes('horizontal')}
+              >
+                <AlignHorizontalSpaceBetween size={16} />
+              </button>
+              <button
+                className="style-choice"
+                type="button"
+                aria-label="Distribute vertically"
+                title="Distribute vertically"
+                onClick={() => onDistributeNodes('vertical')}
+              >
+                <AlignVerticalSpaceBetween size={16} />
+              </button>
+            </div>
+          </div>
+        )}
         <div className="style-section">
           <span className="style-label">Bulk actions</span>
           <div className="style-choice-row style-choice-row--wide">
+            {onGroupSelected && selectionCount >= 2 && (
+              <button
+                className="style-choice"
+                type="button"
+                aria-label="Group selection"
+                title="Group selection (Ctrl+G)"
+                onClick={onGroupSelected}
+                style={{ fontSize: 12, fontWeight: 700, padding: '6px 10px' }}
+              >
+                Group
+              </button>
+            )}
+            {onUngroupSelected && hasGroupedSelection && (
+              <button
+                className="style-choice"
+                type="button"
+                aria-label="Ungroup selection"
+                title="Ungroup selection (Ctrl+Shift+G)"
+                onClick={onUngroupSelected}
+                style={{ fontSize: 12, fontWeight: 700, padding: '6px 10px' }}
+              >
+                Ungroup
+              </button>
+            )}
             <button
               className="style-choice"
               type="button"

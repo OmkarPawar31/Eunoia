@@ -23,6 +23,8 @@ export type BoardNode = {
   rotation?: number;
   /** Global paint order across nodes/arrows/strokes. Defaults to 0. */
   z?: number;
+  /** Composite group identifier. */
+  groupId?: string;
 };
 
 export type ArrowRouting = 'straight' | 'orthogonal' | 'curved';
@@ -37,6 +39,8 @@ export type BoardArrow = {
   routing?: ArrowRouting;
   /** Global paint order across nodes/arrows/strokes. Defaults to 0. */
   z?: number;
+  /** Composite group identifier. */
+  groupId?: string;
 };
 
 export type InkPoint = Point & {
@@ -55,4 +59,6 @@ export type BoardStroke = {
   opacity?: number;
   /** Global paint order across nodes/arrows/strokes. Defaults to 0. */
   z?: number;
+  /** Composite group identifier. */
+  groupId?: string;
 };

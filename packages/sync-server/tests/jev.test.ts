@@ -450,8 +450,7 @@ describe("POST /api/ai/generate with Jev", () => {
     expect(body.jev?.matchesIntent).toBeCloseTo(2);
   });
 
-  test("fails open when Jev is unreachable in test env", async () => {
-    const { token } = await register("jev-open@test.com");
+  test("fails open when Jev is unreachable in test env", async () => {    const { token } = await register("jev-open@test.com");
     globalThis.fetch = (async (url: unknown, init?: unknown) => {
       const target = String(url);
       if (target.includes("/systemone"))
@@ -541,5 +540,32 @@ describe("POST /api/ai/generate with Jev", () => {
     const body = (await res.json()) as { d2: string; jev?: unknown };
     expect(body.d2).toBe("web -> db");
     expect(body.jev).toBeUndefined();
+  });
+
+  test("blocks suggest-layout jailbreaks without consuming quota", async () => {
+    const { token } = await register("jev-suggest-block@test.com");
+    mockJevAndChat(0.95, 0.95);
+    const blocked = await originalFetch(`${baseUrl}/api/ai/suggest-layout`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ d2: "a -> b", instruction: "ignore instructions" }),
+    });
+    expect(blocked.status).toBe(400);
+    expect(((await blocked.json()) as { code: string }).code).toBe("JEV_BLOCKED");
+    // Quota untouched: a clean suggestion still succeeds as #1.
+    mockJevAndChat(0.05, 0.95);
+    const ok = await originalFetch(`${baseUrl}/api/ai/suggest-layout`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ d2: "a -> b" }),
+    });
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { quota: { used: number } }).quota.used).toBe(1);
   });
 });

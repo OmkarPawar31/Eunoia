@@ -48,14 +48,17 @@ describe("AI quota accounting", () => {
 });
 
 describe("listAiModels", () => {
-  test("falls back to curated defaults", () => {
+  test("advertises the single fixed server model", () => {
     const listed = listAiModels(loadConfig({ NODE_ENV: "test" }));
     expect(listed.default).toBe(DEFAULT_AI_MODEL);
-    expect(listed.models).toContain(DEFAULT_AI_MODEL);
-    expect(listed.models.length).toBeGreaterThan(1);
+    expect(listed.models).toEqual([DEFAULT_AI_MODEL]);
   });
 
-  test("honors AI_MODELS allowlist and keeps the default selectable", () => {
+  test("defaults to openai/gpt-oss-120b", () => {
+    expect(DEFAULT_AI_MODEL).toBe("openai/gpt-oss-120b");
+  });
+
+  test("AI_MODEL overrides the fixed default for operators", () => {
     const listed = listAiModels(
       loadConfig({
         NODE_ENV: "test",
@@ -63,17 +66,13 @@ describe("listAiModels", () => {
         AI_MODEL: "house-model",
       }),
     );
-    expect(listed.models).toEqual([
-      "house-model",
-      "team-model-a",
-      "team-model-b",
-    ]);
+    expect(listed.models).toEqual(["house-model"]);
     expect(listed.default).toBe("house-model");
   });
 });
 
 describe("GET /api/ai/models", () => {
-  test("advertises picker models without auth", async () => {
+  test("advertises the fixed server model without auth", async () => {
     const app = createSyncServer(
       loadConfig({
         NODE_ENV: "test",
@@ -99,9 +98,9 @@ describe("GET /api/ai/models", () => {
         default: string;
         configured: boolean;
       };
-      expect(body.models).toContain("picker-a");
-      expect(body.models).toContain("picker-b");
-      expect(body.models).toContain(body.default);
+      // No picker: the allowlist is ignored, one fixed model is served.
+      expect(body.models).toEqual(["openai/gpt-oss-120b"]);
+      expect(body.default).toBe("openai/gpt-oss-120b");
       expect(body.configured).toBe(true);
     } finally {
       await app.close();
@@ -304,5 +303,167 @@ describe("POST /api/ai/generate", () => {
     } finally {
       await keyless.close();
     }
+  });
+
+  test("ignores the legacy client model and uses the fixed server model", async () => {
+    const { token } = await register("ai-fixedmodel@test.com");
+    globalThis.fetch = (async (url: unknown, init?: unknown) => {
+      if (String(url).includes("/chat/completions")) {
+        const payload = JSON.parse((init as { body: string }).body) as {
+          model: string;
+        };
+        expect(payload.model).toBe("test-model");
+        return completion("```d2\nweb -> db\n```");
+      }
+      return originalFetch(url as string, init as RequestInit);
+    }) as typeof fetch;
+
+    const res = await generate(token, {
+      prompt: "web and database",
+      model: "attacker-chosen-model",
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { model: string };
+    expect(body.model).toBe("test-model");
+  });
+});
+
+describe("POST /api/ai/suggest-layout", () => {
+  let app: SyncServer;
+  let baseUrl: string;
+  let originalFetch: typeof fetch;
+
+  const completion = (d2: string) =>
+    new Response(JSON.stringify({ choices: [{ message: { content: d2 } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  beforeEach(async () => {
+    originalFetch = globalThis.fetch;
+    app = createSyncServer(
+      loadConfig({
+        NODE_ENV: "test",
+        ROOM_TICKET_SECRET: "test-secret-32-chars-long-secret!!",
+        AI_API_KEY: "test-ai-key",
+        AI_MODEL: "test-model",
+      }),
+      new MemorySnapshotStore(),
+    );
+    await new Promise<void>((resolve) =>
+      app.server.listen(0, "127.0.0.1", resolve),
+    );
+    const address = app.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("Server did not bind");
+    baseUrl = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    await app.close();
+  });
+
+  async function register(email: string) {
+    const res = await originalFetch(`${baseUrl}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "password123" }),
+    });
+    expect(res.status).toBe(201);
+    return (await res.json()) as { token: string };
+  }
+
+  async function suggest(token: string | undefined, body: unknown) {
+    return originalFetch(`${baseUrl}/api/ai/suggest-layout`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  test("requires authentication", async () => {
+    const res = await suggest(undefined, { d2: "a -> b" });
+    expect(res.status).toBe(401);
+  });
+
+  test("validates the current diagram", async () => {
+    const { token } = await register("ai-suggest-valid@test.com");
+    const empty = await suggest(token, { d2: "   " });
+    expect(empty.status).toBe(400);
+  });
+
+  test("returns a suggested layout with quota accounting", async () => {
+    const { token } = await register("ai-suggest-ok@test.com");
+    globalThis.fetch = (async (url: unknown, init?: unknown) => {
+      if (String(url).includes("/chat/completions")) {
+        const payload = JSON.parse((init as { body: string }).body) as {
+          model: string;
+          messages: Array<{ role: string; content: string }>;
+        };
+        expect(payload.model).toBe("test-model");
+        expect(
+          payload.messages.some((m) => m.content.includes("a -> b")),
+        ).toBe(true);
+        return completion("```d2\ndirection: right\na -> b\n```");
+      }
+      return originalFetch(url as string, init as RequestInit);
+    }) as typeof fetch;
+
+    const res = await suggest(token, { d2: "a -> b" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      d2: string;
+      model: string;
+      quota: { used: number; limit: number };
+    };
+    expect(body.d2).toBe("direction: right\na -> b");
+    expect(body.model).toBe("test-model");
+    expect(body.quota.used).toBe(1);
+    expect(body.quota.limit).toBe(AI_QUOTA.COMMUNITY);
+  });
+
+  test("shares the monthly quota with generation", async () => {
+    const { token } = await register("ai-suggest-quota@test.com");
+    globalThis.fetch = (async (url: unknown, init?: unknown) => {
+      if (String(url).includes("/chat/completions"))
+        return completion("a -> b");
+      return originalFetch(url as string, init as RequestInit);
+    }) as typeof fetch;
+
+    for (let i = 0; i < AI_QUOTA.COMMUNITY; i += 1) {
+      const viaGenerate = i % 2 === 0;
+      const res = viaGenerate
+        ? await originalFetch(`${baseUrl}/api/ai/generate`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({ prompt: `diagram ${i}` }),
+          })
+        : await suggest(token, { d2: "a -> b" });
+      expect(res.status).toBe(200);
+    }
+    const exhausted = await suggest(token, { d2: "a -> b" });
+    expect(exhausted.status).toBe(429);
+    expect(((await exhausted.json()) as { code: string }).code).toBe(
+      "QUOTA_EXHAUSTED",
+    );
+  });
+
+  test("surfaces provider failures as 502", async () => {
+    const { token } = await register("ai-suggest-fail@test.com");
+    globalThis.fetch = (async (url: unknown, init?: unknown) => {
+      if (String(url).includes("/chat/completions"))
+        return new Response("busy", { status: 503 });
+      return originalFetch(url as string, init as RequestInit);
+    }) as typeof fetch;
+
+    const res = await suggest(token, { d2: "a -> b" });
+    expect(res.status).toBe(502);
   });
 });

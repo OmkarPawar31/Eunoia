@@ -31,17 +31,17 @@ function baseUrl(): string {
 }
 
 /**
- * Ask the server to turn natural language into D2 source. The LLM key
- * never leaves the server; the result flows back into the editor and
- * compiles through the normal pipeline.
+ * Shared POST helper for the hosted AI endpoints. The LLM key never leaves
+ * the server; results flow back into the editor and compile through the
+ * normal pipeline.
  */
-export async function generateDiagram(
-  prompt: string,
+async function postAi(
+  path: '/api/ai/generate' | '/api/ai/suggest-layout',
+  body: Record<string, unknown>,
   options: {
     roomId?: string;
     ticket?: string;
     userToken?: string;
-    model?: string;
     token?: string;
   } = {},
 ): Promise<GenerateResponse> {
@@ -49,11 +49,11 @@ export async function generateDiagram(
   if (!authToken) {
     throw new ApiError(
       401,
-      'Sign in to generate diagrams with AI.',
+      'Sign in to use AI features.',
       'AUTH_REQUIRED',
     );
   }
-  const url = `${baseUrl()}/api/ai/generate`;
+  const url = `${baseUrl()}${path}`;
   let response: Response;
   try {
     response = await fetch(url, {
@@ -66,9 +66,8 @@ export async function generateDiagram(
         'x-user-token': authToken,
       },
       body: JSON.stringify({
-        prompt,
+        ...body,
         ...(options.roomId ? { roomId: options.roomId } : {}),
-        ...(options.model ? { model: options.model } : {}),
       }),
     });
   } catch {
@@ -95,4 +94,33 @@ export async function generateDiagram(
     );
   }
   return payload as GenerateResponse;
+}
+
+/** Ask the server to turn natural language into D2 source. */
+export async function generateDiagram(
+  prompt: string,
+  options: {
+    roomId?: string;
+    ticket?: string;
+    userToken?: string;
+    token?: string;
+  } = {},
+): Promise<GenerateResponse> {
+  return postAi('/api/ai/generate', { prompt }, options);
+}
+
+/**
+ * Ask the server to suggest a better layout for existing D2 source.
+ * Content-preserving by contract: same nodes/edges, improved arrangement.
+ */
+export async function suggestLayout(
+  d2: string,
+  options: {
+    roomId?: string;
+    ticket?: string;
+    userToken?: string;
+    token?: string;
+  } = {},
+): Promise<GenerateResponse> {
+  return postAi('/api/ai/suggest-layout', { d2 }, options);
 }

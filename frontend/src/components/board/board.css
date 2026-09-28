@@ -68,6 +68,7 @@
 .stage-footer,
 .zoom-control,
 .history-control,
+.canvas-view-controls,
 .canvas-hint,
 .code-panel-heading,
 .code-panel-status,
@@ -603,6 +604,9 @@
 circle.canvas-grid {
   fill: #d4d3cc;
 }
+path.canvas-grid {
+  stroke: #d4d3cc;
+}
 
 .board-image-layer image {
   overflow: hidden;
@@ -947,7 +951,8 @@ circle.canvas-grid {
 }
 
 .zoom-control,
-.history-control {
+.history-control,
+.canvas-view-controls {
   overflow: hidden;
   border: 1px solid #454c72;
   border-radius: 7px;
@@ -955,7 +960,8 @@ circle.canvas-grid {
 }
 
 .zoom-control button,
-.history-control button {
+.history-control button,
+.canvas-view-controls button {
   width: 32px;
   height: 31px;
   display: grid;
@@ -967,9 +973,15 @@ circle.canvas-grid {
 }
 
 .zoom-control button:hover,
-.history-control button:hover {
+.history-control button:hover,
+.canvas-view-controls button:hover {
   background: #3b4165;
   color: #fff;
+}
+
+.canvas-view-controls button.is-active {
+  color: #ec8b57;
+  background: rgba(236, 139, 87, 0.18);
 }
 
 .zoom-value {
@@ -1753,6 +1765,9 @@ circle.canvas-grid {
 circle.canvas-grid {
   fill: #e0dfd8;
 }
+path.canvas-grid {
+  stroke: #e0dfd8;
+}
 
 .canvas-caption {
   top: 62px;
@@ -1771,21 +1786,29 @@ circle.canvas-grid {
 }
 
 .zoom-control,
-.history-control {
+.history-control,
+.canvas-view-controls {
   border-color: #e1e0e9;
   background: #ffffff;
   box-shadow: 0 3px 12px rgba(33, 35, 65, 0.09);
 }
 
 .zoom-control button,
-.history-control button {
+.history-control button,
+.canvas-view-controls button {
   color: #717388;
 }
 
 .zoom-control button:hover,
-.history-control button:hover {
+.history-control button:hover,
+.canvas-view-controls button:hover {
   background: #f6f5fb;
   color: var(--board-ink);
+}
+
+.canvas-view-controls button.is-active {
+  color: #6965db;
+  background: #eeedff;
 }
 
 .zoom-divider {

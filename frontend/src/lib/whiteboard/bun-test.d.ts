@@ -8,6 +8,7 @@ declare module 'bun:test' {
     toBe(expected: unknown): void;
     toEqual(expected: unknown): void;
     toBeNull(): void;
+    toBeGreaterThan(expected: number): void;
     toMatchObject(expected: unknown): void;
     not: {
       toBeNull(): void;

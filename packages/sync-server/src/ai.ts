@@ -12,29 +12,25 @@ export const AI_QUOTA: Record<Tier, number> = {
 /** Curated model suggestions for the frontend picker. The provider is any
  * OpenAI-compatible endpoint, so callers may still request other model ids
  * (custom deployments, proxies); this list only drives the UI. */
-export const FALLBACK_AI_MODELS = [
-  "gpt-4o-mini",
-  "gpt-4o",
-  "o4-mini",
-  "gpt-4.1-mini",
-] as const;
+export const FALLBACK_AI_MODELS = ["openai/gpt-oss-120b"] as const;
 
 export const DEFAULT_AI_MODEL = FALLBACK_AI_MODELS[0];
 
-/** Resolve the advertised model list: explicit `AI_MODELS` allowlist wins,
- * otherwise the curated fallback. The configured default (`AI_MODEL`) is
- * always included first so the picker can select it. */
+/** The single server-side model used for every AI feature (no picker). */
+export function resolveAiModel(config: Config): string {
+  const configured = config.aiModel?.trim();
+  return configured && configured.length > 0 ? configured : DEFAULT_AI_MODEL;
+}
+
+/** Resolve the advertised model list: the fixed server model, always. There
+ * is no client model picker; `AI_MODEL` lets the operator change the fixed
+ * model, and `AI_MODELS` is accepted but ignored (kept for config compat). */
 export function listAiModels(config: Config): {
   models: string[];
   default: string;
 } {
-  const fallback = config.aiModel?.trim() || DEFAULT_AI_MODEL;
-  const configured = (config.aiModels ?? [])
-    .map((m) => m.trim())
-    .filter((m) => m.length > 0);
-  const models = configured.length > 0 ? configured : [...FALLBACK_AI_MODELS];
-  if (!models.includes(fallback)) models.unshift(fallback);
-  return { models, default: fallback };
+  const fixed = resolveAiModel(config);
+  return { models: [fixed], default: fixed };
 }
 
 export type AiGenerateResult = {
@@ -98,16 +94,20 @@ Rules:
 - Prefer containers for grouping related nodes.`;
 
 const MAX_PROMPT_CHARS = 4000;
+const MAX_LAYOUT_D2_CHARS = 8000;
 const MAX_D2_CHARS = 50_000;
+
+/** Default directive when the client sends no layout instruction. */
+export const DEFAULT_LAYOUT_INSTRUCTION = "Improve the layout of this diagram.";
 
 /**
  * Generates D2 source from natural language via any OpenAI-compatible
- * chat-completions endpoint. Keys stay server-side (hosted model).
+ * chat-completions endpoint. Keys stay server-side (hosted model). The
+ * model is always the fixed server model — clients cannot choose.
  */
 export async function generateD2(
   prompt: string,
   config: Config,
-  model?: string,
 ): Promise<AiGenerateResult> {
   const apiKey = config.aiApiKey;
   if (!apiKey) throw new Error("AI is not configured");
@@ -115,7 +115,61 @@ export async function generateD2(
   if (!trimmed) throw new Error("Prompt must not be empty");
   if (trimmed.length > MAX_PROMPT_CHARS)
     throw new Error("Prompt exceeds the 4000 character limit");
-  const useModel = model?.trim() || config.aiModel || DEFAULT_AI_MODEL;
+  const content = await chatCompletion(config, [
+    { role: "system", content: SYSTEM_PROMPT },
+    { role: "user", content: trimmed },
+  ]);
+  const d2 = extractD2(content);
+  if (d2.length > MAX_D2_CHARS)
+    throw new Error("Generated diagram exceeds the size limit");
+  return { d2, model: resolveAiModel(config) };
+}
+
+const LAYOUT_SYSTEM_PROMPT = `You are a D2 diagram-layout expert. Rewrite the user's D2 to improve its layout.
+Rules:
+- Output ONLY D2 code inside a single \`\`\`d2 fenced block, nothing else.
+- Preserve every existing node key, label, and connection exactly: do not rename, add, or remove content.
+- Only improve structure for readability: direction, grouping with containers, and edge arrangement.
+- Keep diagrams focused: at most 30 nodes unless the input has more.`;
+
+/**
+ * Suggests an improved layout for existing D2 source. Content-preserving by
+ * contract (same nodes/edges, better arrangement); the normal compile
+ * pipeline remains the real validation.
+ */
+export async function suggestLayoutD2(
+  currentD2: string,
+  instruction: string | undefined,
+  config: Config,
+): Promise<AiGenerateResult> {
+  const apiKey = config.aiApiKey;
+  if (!apiKey) throw new Error("AI is not configured");
+  const source = currentD2.trim();
+  if (!source) throw new Error("Current diagram must not be empty");
+  if (source.length > MAX_LAYOUT_D2_CHARS)
+    throw new Error("Current diagram exceeds the 8000 character limit");
+  const directive = instruction?.trim() || DEFAULT_LAYOUT_INSTRUCTION;
+  const content = await chatCompletion(config, [
+    { role: "system", content: LAYOUT_SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: `Instruction: ${directive}\n\n\`\`\`d2\n${source}\n\`\`\``,
+    },
+  ]);
+  const d2 = extractD2(content);
+  if (d2.length > MAX_D2_CHARS)
+    throw new Error("Generated diagram exceeds the size limit");
+  return { d2, model: resolveAiModel(config) };
+}
+
+/** Single OpenAI-compatible chat-completions round-trip. */
+async function chatCompletion(
+  config: Config,
+  messages: Array<{ role: string; content: string }>,
+): Promise<string> {
+  const apiKey = config.aiApiKey;
+  if (!apiKey) throw new Error("AI is not configured");
+  const useModel = resolveAiModel(config);
   const baseUrl = (config.aiApiBaseUrl ?? "https://api.openai.com/v1").replace(
     /\/+$/,
     "",
@@ -130,10 +184,7 @@ export async function generateD2(
       model: useModel,
       temperature: 0.2,
       max_tokens: 4000,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: trimmed },
-      ],
+      messages,
     }),
     signal: AbortSignal.timeout(60_000),
   });
@@ -146,10 +197,7 @@ export async function generateD2(
   const content = data.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content.trim())
     throw new Error("AI provider returned an empty response");
-  const d2 = extractD2(content);
-  if (d2.length > MAX_D2_CHARS)
-    throw new Error("Generated diagram exceeds the size limit");
-  return { d2, model: useModel };
+  return content;
 }
 
 /**

@@ -11,12 +11,6 @@ import {
   initialsForName,
 } from './board-ui';
 import { parseD2Diagnostics, type D2Diagnostic } from '@/lib/whiteboard/d2-diagnostics';
-import {
-  FALLBACK_AI_MODELS,
-  fetchAiModels,
-  loadPreferredModel,
-  storePreferredModel,
-} from '@/lib/whiteboard/ai-models';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -30,10 +24,12 @@ import {
   Download,
   Ellipsis,
   Eraser,
+  Grid,
   Hand,
   Image as ImageIcon,
   Layers2,
   LockKeyhole,
+  Map as MapIcon,
   Maximize2,
   Minus,
   MousePointer2,
@@ -83,6 +79,10 @@ import {
   unionAabbs,
   WORLD_VIEWPORT,
   zoomCameraAtPoint,
+  alignNodes,
+  distributeNodes,
+  type AlignType,
+  type DistributeAxis,
   type Aabb,
   type Camera,
   type Point,
@@ -162,6 +162,13 @@ import {
   uploadThumbnail,
 } from '@/lib/whiteboard/export/thumbnail';
 import { getRecentRooms, recordRoomVisit } from '@/lib/whiteboard/recent-rooms';
+import { Minimap } from './Minimap';
+import {
+  computeSmartSnap,
+  type SmartGuide,
+  type SnapCandidate,
+} from '@/lib/whiteboard/smart-guides';
+import { CanvasScheduler } from '@/lib/whiteboard/canvas-scheduler';
 import './board.css';
 
 type ToolId =
@@ -1094,6 +1101,46 @@ export function WhiteboardPage({
   const [strokes, setStrokes] = useState<BoardStroke[]>([]);
   const [camera, setCamera] = useState<Camera>(INITIAL_CAMERA);
   const [canvasViewport, setCanvasViewport] = useState(WORLD_VIEWPORT);
+  const [gridMode, setGridMode] = useState<'dots' | 'lines' | 'none'>(() => {
+    if (typeof window === 'undefined') return 'dots';
+    const stored = window.localStorage.getItem('eunoia:gridMode');
+    return stored === 'lines' || stored === 'none' ? stored : 'dots';
+  });
+  const [gridSize, setGridSize] = useState<number>(() => {
+    if (typeof window === 'undefined') return 24;
+    const stored = Number(window.localStorage.getItem('eunoia:gridSize'));
+    return stored === 8 || stored === 16 || stored === 24 || stored === 32 ? stored : 24;
+  });
+  const [showMinimap, setShowMinimap] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    const stored = window.localStorage.getItem('eunoia:minimap');
+    return stored === 'false' ? false : true;
+  });
+  const [activeGuides, setActiveGuides] = useState<SmartGuide[]>([]);
+  const schedulerRef = useRef<CanvasScheduler>(new CanvasScheduler());
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('eunoia:gridMode', gridMode);
+    }
+  }, [gridMode]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('eunoia:minimap', String(showMinimap));
+    }
+  }, [showMinimap]);
+
+  useEffect(() => {
+    let animId: number;
+    const scheduler = schedulerRef.current;
+    const tick = (now: number) => {
+      scheduler.shouldRender(now);
+      animId = requestAnimationFrame(tick);
+    };
+    animId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animId);
+  }, []);
   const [marquee, setMarquee] = useState<Aabb | null>(null);
   const [showCode, setShowCode] = useState(true);
   const [code, setCode] = useState(DEFAULT_D2_CODE);
@@ -1140,12 +1187,6 @@ export function WhiteboardPage({
     limit: number;
   } | null>(null);
   const [jevWarnings, setJevWarnings] = useState<string[]>([]);
-  const [aiModels, setAiModels] = useState<string[]>([...FALLBACK_AI_MODELS]);
-  const [aiModel, setAiModel] = useState<string>(
-    () =>
-      (typeof window !== 'undefined' ? loadPreferredModel() : null) ??
-      FALLBACK_AI_MODELS[0],
-  );
   /** Inline Monaco markers for the latest D2 compile failure. */
   const [d2Diagnostics, setD2Diagnostics] = useState<D2Diagnostic[]>([]);
   /** Live magnetic port snap target while routing arrows. */
@@ -1203,14 +1244,6 @@ export function WhiteboardPage({
   useEffect(() => {
     arrowRoutingRef.current = arrowRouting;
   }, [arrowRouting]);
-
-  // Model picker selection mirrored into a ref so the async generate
-  // callback never sends a stale value.
-  const aiModelRef = useRef<string>(aiModel);
-
-  useEffect(() => {
-    aiModelRef.current = aiModel;
-  }, [aiModel]);
 
   const brushRef = useRef({ size: brushSize, thinning: brushThinning });
 
@@ -1395,6 +1428,7 @@ export function WhiteboardPage({
    * canvas is never yanked mid-drag (see flushPendingRemote).
    */
   const applyRemoteState = useCallback((clean: PersistedBoard) => {
+    schedulerRef.current.markActive();
     if (interactionRef.current) {
       pendingRemoteRef.current = clean;
       return;
@@ -1976,6 +2010,10 @@ export function WhiteboardPage({
     () => nodes.find((node) => node.id === selectedId) ?? null,
     [nodes, selectedId],
   );
+  const selectedNodes = useMemo(() => {
+    const set = new Set(selectedIds);
+    return nodes.filter((n) => set.has(n.id));
+  }, [nodes, selectedIds]);
   // Bulk-aware opacity: single node → its value; otherwise first selected
   // stroke/node so the slider always reflects (and restyles) the selection.
   const selectedOpacity = useMemo(() => {
@@ -2338,6 +2376,162 @@ export function WhiteboardPage({
     });
   }, [captureBoardSnapshot, locked, pushDiscreteChange, selectedIds]);
 
+  const alignSelectedNodes = useCallback(
+    (type: AlignType) => {
+      if (locked || selectedNodes.length < 2) return;
+      const before = captureBoardSnapshot();
+      const aligned = alignNodes(selectedNodes, type);
+      const alignedMap = new Map(aligned.map((n) => [n.id, n]));
+      const nextNodes = nodes.map((n) => alignedMap.get(n.id) ?? n);
+      setNodes(nextNodes);
+
+      const nodeMap = new Map(nextNodes.map((n) => [n.id, n]));
+      let nextArrows = arrows;
+      setArrows((curr) => {
+        const updated = curr.map((arrow) => {
+          if (!arrow.startNodeId && !arrow.endNodeId) return arrow;
+          const sNode = arrow.startNodeId ? nodeMap.get(arrow.startNodeId) : undefined;
+          const eNode = arrow.endNodeId ? nodeMap.get(arrow.endNodeId) : undefined;
+          let nextStart = arrow.start;
+          let nextEnd = arrow.end;
+          if (sNode) {
+            nextStart = getRoutedAnchor(
+              sNode,
+              eNode ? { x: eNode.x + eNode.width / 2, y: eNode.y + eNode.height / 2 } : arrow.end,
+              arrow.routing,
+            );
+          }
+          if (eNode) {
+            nextEnd = getRoutedAnchor(
+              eNode,
+              sNode ? { x: sNode.x + sNode.width / 2, y: sNode.y + sNode.height / 2 } : arrow.start,
+              arrow.routing,
+            );
+          }
+          return { ...arrow, start: nextStart, end: nextEnd };
+        });
+        nextArrows = updated;
+        return updated;
+      });
+      pushDiscreteChange(before, {
+        ...before,
+        nodes: nextNodes,
+        arrows: nextArrows,
+      });
+    },
+    [arrows, captureBoardSnapshot, locked, nodes, pushDiscreteChange, selectedNodes],
+  );
+
+  const distributeSelectedNodes = useCallback(
+    (axis: DistributeAxis) => {
+      if (locked || selectedNodes.length < 3) return;
+      const before = captureBoardSnapshot();
+      const distributed = distributeNodes(selectedNodes, axis);
+      const distMap = new Map(distributed.map((n) => [n.id, n]));
+      const nextNodes = nodes.map((n) => distMap.get(n.id) ?? n);
+      setNodes(nextNodes);
+
+      const nodeMap = new Map(nextNodes.map((n) => [n.id, n]));
+      let nextArrows = arrows;
+      setArrows((curr) => {
+        const updated = curr.map((arrow) => {
+          if (!arrow.startNodeId && !arrow.endNodeId) return arrow;
+          const sNode = arrow.startNodeId ? nodeMap.get(arrow.startNodeId) : undefined;
+          const eNode = arrow.endNodeId ? nodeMap.get(arrow.endNodeId) : undefined;
+          let nextStart = arrow.start;
+          let nextEnd = arrow.end;
+          if (sNode) {
+            nextStart = getRoutedAnchor(
+              sNode,
+              eNode ? { x: eNode.x + eNode.width / 2, y: eNode.y + eNode.height / 2 } : arrow.end,
+              arrow.routing,
+            );
+          }
+          if (eNode) {
+            nextEnd = getRoutedAnchor(
+              eNode,
+              sNode ? { x: sNode.x + sNode.width / 2, y: sNode.y + sNode.height / 2 } : arrow.start,
+              arrow.routing,
+            );
+          }
+          return { ...arrow, start: nextStart, end: nextEnd };
+        });
+        nextArrows = updated;
+        return updated;
+      });
+      pushDiscreteChange(before, {
+        ...before,
+        nodes: nextNodes,
+        arrows: nextArrows,
+      });
+    },
+    [arrows, captureBoardSnapshot, locked, nodes, pushDiscreteChange, selectedNodes],
+  );
+
+  const hasGroupedSelection = useMemo(() => {
+    const selSet = new Set(selectedIds);
+    return (
+      nodes.some((n) => selSet.has(n.id) && !!n.groupId) ||
+      arrows.some((a) => selSet.has(a.id) && !!a.groupId) ||
+      strokes.some((s) => selSet.has(s.id) && !!s.groupId)
+    );
+  }, [arrows, nodes, selectedIds, strokes]);
+
+  const groupSelected = useCallback(() => {
+    if (locked || selectedIds.length < 2) return;
+    const before = captureBoardSnapshot();
+    const newGroupId = `grp_${Math.random().toString(36).slice(2, 10)}`;
+    const selSet = new Set(selectedIds);
+
+    const nextNodes = nodes.map((n) =>
+      selSet.has(n.id) ? { ...n, groupId: newGroupId } : n,
+    );
+    const nextArrows = arrows.map((a) =>
+      selSet.has(a.id) ? { ...a, groupId: newGroupId } : a,
+    );
+    const nextStrokes = strokes.map((s) =>
+      selSet.has(s.id) ? { ...s, groupId: newGroupId } : s,
+    );
+
+    setNodes(nextNodes);
+    setArrows(nextArrows);
+    setStrokes(nextStrokes);
+
+    pushDiscreteChange(before, {
+      ...before,
+      nodes: nextNodes,
+      arrows: nextArrows,
+      strokes: nextStrokes,
+    });
+  }, [arrows, captureBoardSnapshot, locked, nodes, pushDiscreteChange, selectedIds, strokes]);
+
+  const ungroupSelected = useCallback(() => {
+    if (locked || selectedIds.length === 0) return;
+    const before = captureBoardSnapshot();
+    const selSet = new Set(selectedIds);
+
+    const nextNodes = nodes.map((n) =>
+      selSet.has(n.id) ? { ...n, groupId: undefined } : n,
+    );
+    const nextArrows = arrows.map((a) =>
+      selSet.has(a.id) ? { ...a, groupId: undefined } : a,
+    );
+    const nextStrokes = strokes.map((s) =>
+      selSet.has(s.id) ? { ...s, groupId: undefined } : s,
+    );
+
+    setNodes(nextNodes);
+    setArrows(nextArrows);
+    setStrokes(nextStrokes);
+
+    pushDiscreteChange(before, {
+      ...before,
+      nodes: nextNodes,
+      arrows: nextArrows,
+      strokes: nextStrokes,
+    });
+  }, [arrows, captureBoardSnapshot, locked, nodes, pushDiscreteChange, selectedIds, strokes]);
+
   /**
    * Eraser hit-test at a world point. Removes the topmost node under the
    * cursor plus any strokes/arrows within radius. Reads live refs so
@@ -2679,15 +2873,30 @@ export function WhiteboardPage({
       }
 
       gestureBaseRef.current = null;
+
+      // Group resolution: if the clicked element belongs to a group, select all group members
+      const elNode = nodes.find((n) => n.id === elementId);
+      const elArrow = arrows.find((a) => a.id === elementId);
+      const elStroke = strokes.find((s) => s.id === elementId);
+      const groupId = elNode?.groupId ?? elArrow?.groupId ?? elStroke?.groupId;
+
+      let memberIds = [elementId];
+      if (groupId) {
+        const groupNodeIds = nodes.filter((n) => n.groupId === groupId).map((n) => n.id);
+        const groupArrowIds = arrows.filter((a) => a.groupId === groupId).map((a) => a.id);
+        const groupStrokeIds = strokes.filter((s) => s.groupId === groupId).map((s) => s.id);
+        memberIds = Array.from(new Set([...groupNodeIds, ...groupArrowIds, ...groupStrokeIds]));
+      }
+
       let nextSelected: string[];
       if (event.shiftKey) {
-        nextSelected = selectedIds.includes(elementId)
-          ? selectedIds.filter((id) => id !== elementId)
-          : [...selectedIds, elementId];
+        const anySelected = memberIds.some((id) => selectedIds.includes(id));
+        nextSelected = anySelected
+          ? selectedIds.filter((id) => !memberIds.includes(id))
+          : [...selectedIds, ...memberIds];
       } else {
-        nextSelected = selectedIds.includes(elementId)
-          ? selectedIds
-          : [elementId];
+        const alreadySelected = memberIds.every((id) => selectedIds.includes(id));
+        nextSelected = alreadySelected ? selectedIds : memberIds;
       }
       setSelectedIds(nextSelected);
 
@@ -2966,6 +3175,92 @@ export function WhiteboardPage({
           y: worldPoint.y - interaction.startWorld.y,
         };
         const movedNodeIds = interaction.originNodes.map((item) => item.id);
+        const movedNodeSet = new Set(movedNodeIds);
+
+        let effectiveDeltaX = delta.x;
+        let effectiveDeltaY = delta.y;
+
+        if (interaction.originNodes.length > 0) {
+          const candidates: SnapCandidate[] = nodesRef.current
+            .filter((n) => !movedNodeSet.has(n.id))
+            .map((n) => ({
+              id: n.id,
+              x: n.x,
+              y: n.y,
+              width: n.width,
+              height: n.height,
+            }));
+
+          let dragMinX = Infinity;
+          let dragMinY = Infinity;
+          let dragMaxX = -Infinity;
+          let dragMaxY = -Infinity;
+          const currentNodesMap = new Map(
+            nodesRef.current.map((item) => [item.id, item]),
+          );
+          for (const origin of interaction.originNodes) {
+            const item = currentNodesMap.get(origin.id);
+            const w = item?.width ?? 120;
+            const h = item?.height ?? 60;
+            dragMinX = Math.min(dragMinX, origin.x + delta.x);
+            dragMinY = Math.min(dragMinY, origin.y + delta.y);
+            dragMaxX = Math.max(dragMaxX, origin.x + delta.x + w);
+            dragMaxY = Math.max(dragMaxY, origin.y + delta.y + h);
+          }
+
+          const snapThreshold = 6 / camera.zoom;
+          const smartSnap =
+            candidates.length > 0
+              ? computeSmartSnap(
+                  {
+                    minX: dragMinX,
+                    minY: dragMinY,
+                    maxX: dragMaxX,
+                    maxY: dragMaxY,
+                  },
+                  candidates,
+                  snapThreshold,
+                )
+              : { snappedX: dragMinX, snappedY: dragMinY, guides: [] };
+
+          const hasVGuide = smartSnap.guides.some(
+            (g) => g.orientation === 'vertical',
+          );
+          const hasHGuide = smartSnap.guides.some(
+            (g) => g.orientation === 'horizontal',
+          );
+
+          if (hasVGuide) {
+            effectiveDeltaX = delta.x + (smartSnap.snappedX - dragMinX);
+          } else if (gridMode !== 'none') {
+            const first = interaction.originNodes[0];
+            const snapped = snapPoint(
+              { x: first.x + delta.x, y: first.y + delta.y },
+              gridSize,
+            );
+            effectiveDeltaX = snapped.x - first.x;
+          }
+
+          if (hasHGuide) {
+            effectiveDeltaY = delta.y + (smartSnap.snappedY - dragMinY);
+          } else if (gridMode !== 'none') {
+            const first = interaction.originNodes[0];
+            const snapped = snapPoint(
+              { x: first.x + delta.x, y: first.y + delta.y },
+              gridSize,
+            );
+            effectiveDeltaY = snapped.y - first.y;
+          }
+
+          setActiveGuides(smartSnap.guides);
+        } else {
+          if (gridMode !== 'none') {
+            const snapped = snapPoint(delta, gridSize);
+            effectiveDeltaX = snapped.x;
+            effectiveDeltaY = snapped.y;
+          }
+          setActiveGuides([]);
+        }
 
         setNodes((current) =>
           current.map((node) => {
@@ -2973,11 +3268,11 @@ export function WhiteboardPage({
               (item) => item.id === node.id,
             );
             if (!origin) return node;
-            const snapped = snapPoint({
-              x: origin.x + delta.x,
-              y: origin.y + delta.y,
-            });
-            return { ...node, x: snapped.x, y: snapped.y };
+            return {
+              ...node,
+              x: origin.x + effectiveDeltaX,
+              y: origin.y + effectiveDeltaY,
+            };
           }),
         );
 
@@ -2990,12 +3285,12 @@ export function WhiteboardPage({
               return {
                 ...arrow,
                 start: {
-                  x: origin.start.x + delta.x,
-                  y: origin.start.y + delta.y,
+                  x: origin.start.x + effectiveDeltaX,
+                  y: origin.start.y + effectiveDeltaY,
                 },
                 end: {
-                  x: origin.end.x + delta.x,
-                  y: origin.end.y + delta.y,
+                  x: origin.end.x + effectiveDeltaX,
+                  y: origin.end.y + effectiveDeltaY,
                 },
               };
             }
@@ -3027,11 +3322,14 @@ export function WhiteboardPage({
                     (item) => item.id === node.id,
                   );
                   if (isMoving && nodeOrigin) {
-                    const snapped = snapPoint({
-                      x: nodeOrigin.x + delta.x,
-                      y: nodeOrigin.y + delta.y,
-                    });
-                    return [node.id, { ...node, x: snapped.x, y: snapped.y }];
+                    return [
+                      node.id,
+                      {
+                        ...node,
+                        x: nodeOrigin.x + effectiveDeltaX,
+                        y: nodeOrigin.y + effectiveDeltaY,
+                      },
+                    ];
                   }
                   return [node.id, node];
                 }),
@@ -3083,8 +3381,12 @@ export function WhiteboardPage({
               ...stroke,
               points: origin.points.map((p) =>
                 typeof p.pressure === 'number'
-                  ? { x: p.x + delta.x, y: p.y + delta.y, pressure: p.pressure }
-                  : { x: p.x + delta.x, y: p.y + delta.y },
+                  ? {
+                      x: p.x + effectiveDeltaX,
+                      y: p.y + effectiveDeltaY,
+                      pressure: p.pressure,
+                    }
+                  : { x: p.x + effectiveDeltaX, y: p.y + effectiveDeltaY },
               ),
             };
           }),
@@ -3420,7 +3722,7 @@ export function WhiteboardPage({
         setSelectedIds(liveSelected);
       }
     },
-    [canvasViewport, beginGesture, eraseAtPoint],
+    [canvasViewport, beginGesture, eraseAtPoint, camera, gridMode, gridSize],
   );
 
   const handleCanvasPointerUp = useCallback(
@@ -3702,6 +4004,7 @@ export function WhiteboardPage({
       flushPendingRemote();
       setMarquee(null);
       setCreatePreview(null);
+      setActiveGuides([]);
       gestureBaseRef.current = null;
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
@@ -3736,6 +4039,7 @@ export function WhiteboardPage({
     viewportRectRef.current = null;
     setMarquee(null);
     setActivePortSnap(null);
+    setActiveGuides([]);
     flushPendingRemote();
   }, [flushPendingRemote]);
 
@@ -3753,6 +4057,7 @@ export function WhiteboardPage({
 
   const handleCanvasWheel = useCallback(
     (event: ReactWheelEvent<SVGSVGElement>) => {
+      schedulerRef.current.markActive();
       const screenPoint = pointerToViewportPoint(
         event,
         event.currentTarget,
@@ -4105,6 +4410,7 @@ export function WhiteboardPage({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      schedulerRef.current.markActive();
       if (isEditableTarget(event.target)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -4149,6 +4455,24 @@ export function WhiteboardPage({
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') {
         event.preventDefault();
         duplicateSelected();
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'g') {
+        event.preventDefault();
+        if (event.shiftKey) {
+          ungroupSelected();
+        } else {
+          groupSelected();
+        }
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'm') {
+        event.preventDefault();
+        setShowMinimap((prev) => !prev);
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key === "'") {
+        event.preventDefault();
+        setGridMode((prev) =>
+          prev === 'dots' ? 'lines' : prev === 'lines' ? 'none' : 'dots',
+        );
       }
       if (
         !locked &&
@@ -4771,7 +5095,6 @@ export function WhiteboardPage({
         roomId: roomId ?? undefined,
         ticket: roomId ? getTicket(roomId) : undefined,
         userToken: resolveUserToken(),
-        model: aiModelRef.current,
       });
       setAiQuota(result.quota);
       setJevWarnings(result.jev?.warnings ?? []);
@@ -4815,33 +5138,63 @@ export function WhiteboardPage({
     }
   }, [aiBusy, aiPrompt, handleCodeChange, locked, resolveUserToken, roomId]);
 
-  const selectAiModel = useCallback((model: string) => {
-    const trimmed = model.trim();
-    if (!trimmed) return;
-    aiModelRef.current = trimmed;
-    setAiModel(trimmed);
-    storePreferredModel(trimmed);
-  }, []);
-
-  // Advertise server models once per mount; the stored preference wins when
-  // the server still offers it.
-  useEffect(() => {
-    let cancelled = false;
-    void fetchAiModels().then((listed) => {
-      if (cancelled) return;
-      setAiModels(listed.models);
-      const preferred = loadPreferredModel();
-      const next =
-        preferred && listed.models.includes(preferred)
-          ? preferred
-          : listed.default;
-      aiModelRef.current = next;
-      setAiModel(next);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // Suggest a better layout for the current D2: same AI pipeline as
+  // generation (auth, quota, guardrails), result flows back through the
+  // normal compile + undo path.
+  const suggestLayoutWithAi = useCallback(async () => {
+    const source = code.trim();
+    if (!source || aiBusy) return;
+    if (locked) return;
+    setAiBusy(true);
+    setBoardError(null);
+    setJevWarnings([]);
+    try {
+      const { suggestLayout } = await import('@/lib/whiteboard/ai-api');
+      const result = await suggestLayout(source, {
+        roomId: roomId ?? undefined,
+        ticket: roomId ? getTicket(roomId) : undefined,
+        userToken: resolveUserToken(),
+      });
+      setAiQuota(result.quota);
+      setJevWarnings(result.jev?.warnings ?? []);
+      handleCodeChange(result.d2);
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'AUTH_REQUIRED') {
+        setBoardError('Sign in to use AI layout suggestions.');
+      } else if (
+        error instanceof ApiError &&
+        error.code === 'AI_NOT_CONFIGURED'
+      ) {
+        setBoardError(
+          'AI generation is not configured on this server. Set AI_API_KEY to enable it.',
+        );
+      } else if (error instanceof ApiError && error.code === 'JEV_BLOCKED') {
+        setBoardError(
+          'Prompt blocked by AI guardrails (suspected prompt injection).',
+        );
+      } else if (
+        error instanceof ApiError &&
+        error.code === 'JEV_LOW_INTENT'
+      ) {
+        setBoardError(
+          'That does not look like a diagram request. Describe nodes and connections.',
+        );
+      } else if (
+        error instanceof ApiError &&
+        error.code === 'JEV_UNAVAILABLE'
+      ) {
+        setBoardError(
+          'AI guardrails are temporarily unavailable. Try again shortly.',
+        );
+      } else {
+        setBoardError(
+          error instanceof Error ? error.message : 'AI suggestion failed.',
+        );
+      }
+    } finally {
+      setAiBusy(false);
+    }
+  }, [aiBusy, code, handleCodeChange, locked, resolveUserToken, roomId]);
 
   // Auto-compile a short pause after the user stops typing, as promised by
   // the footer copy. Skips when the code already matches the last success.
@@ -5913,6 +6266,7 @@ export function WhiteboardPage({
               arrowRouting={arrowRouting}
               selectedArrowCount={selectedArrowCount}
               selectedStrokeCount={selectedStrokeCount}
+              selectedNodeCount={selectedNodes.length}
               brushSize={brushSize}
               brushThinning={brushThinning}
               onClose={() => setStylePanelOpen(false)}
@@ -5924,6 +6278,11 @@ export function WhiteboardPage({
               onApplyBulkOpacity={applyBulkOpacity}
               onApplyFontSize={applyFontSize}
               onMoveLayer={moveSelectedLayer}
+              onAlignNodes={alignSelectedNodes}
+              onDistributeNodes={distributeSelectedNodes}
+              hasGroupedSelection={hasGroupedSelection}
+              onGroupSelected={groupSelected}
+              onUngroupSelected={ungroupSelected}
               onDeleteSelected={deleteSelected}
               onDuplicateSelected={duplicateSelected}
             />
@@ -6065,6 +6424,7 @@ export function WhiteboardPage({
               aria-describedby="canvas-hint"
               onPointerDown={handleCanvasPointerDown}
               onPointerMove={(event) => {
+                schedulerRef.current.markActive();
                 broadcastCursor(event);
                 handleCanvasPointerMove(event);
               }}
@@ -6083,11 +6443,26 @@ export function WhiteboardPage({
               <defs>
                 <pattern
                   id="dotGrid"
-                  width="24"
-                  height="24"
+                  width={gridSize}
+                  height={gridSize}
                   patternUnits="userSpaceOnUse"
                 >
-                  <circle className="canvas-grid" cx="12" cy="12" r="1" />
+                  <circle className="canvas-grid" cx={gridSize / 2} cy={gridSize / 2} r="1" />
+                </pattern>
+                <pattern
+                  id="lineGrid"
+                  width={gridSize}
+                  height={gridSize}
+                  patternUnits="userSpaceOnUse"
+                >
+                  <path
+                    d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="0.5"
+                    className="canvas-grid"
+                    opacity="0.4"
+                  />
                 </pattern>
                 <marker
                   id="arrowhead"
@@ -6140,7 +6515,13 @@ export function WhiteboardPage({
                 y={viewBox.minY - 2000}
                 width={viewBox.width + 4000}
                 height={viewBox.height + 4000}
-                fill="url(#dotGrid)"
+                fill={
+                  gridMode === 'dots'
+                    ? 'url(#dotGrid)'
+                    : gridMode === 'lines'
+                      ? 'url(#lineGrid)'
+                      : 'none'
+                }
                 style={{ pointerEvents: 'none' }}
               />
               <g className="canvas-main">
@@ -6289,6 +6670,20 @@ export function WhiteboardPage({
                     height={marquee.maxY - marquee.minY}
                   />
                 )}
+                {activeGuides.map((guide) => (
+                  <line
+                    key={guide.id}
+                    x1={guide.x1}
+                    y1={guide.y1}
+                    x2={guide.x2}
+                    y2={guide.y2}
+                    stroke="#ec8b57"
+                    strokeWidth={1.5 / camera.zoom}
+                    strokeDasharray={`${4 / camera.zoom},${4 / camera.zoom}`}
+                    pointerEvents="none"
+                    opacity={0.85}
+                  />
+                ))}
                 {peerSelectionOutlines.map((outline) => (
                   <g key={outline.key} pointerEvents="none">
                     <rect
@@ -6405,22 +6800,37 @@ export function WhiteboardPage({
 
             {/* In-place text editing overlay */}
             {activeEditingNode && editingNode && activeEditingNodeScreenPos && (
-              <input
+              <textarea
                 ref={(el) => {
-                  if (el) el.focus();
+                  if (el) {
+                    el.focus();
+                    el.select();
+                  }
                 }}
-                type="text"
                 value={editingNode.value}
                 placeholder={
                   activeEditingNode.shape === 'text'
-                    ? 'Type text...'
+                    ? 'Type text (Shift+Enter for newline)...'
                     : 'Edit label...'
                 }
                 onChange={(e) =>
                   setEditingNode({ ...editingNode, value: e.target.value })
                 }
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') commitEdit();
+                  if (e.key === 'Enter') {
+                    if (e.shiftKey) {
+                      return;
+                    }
+                    if (
+                      e.metaKey ||
+                      e.ctrlKey ||
+                      (activeEditingNode.shape !== 'note' &&
+                        activeEditingNode.shape !== 'text')
+                    ) {
+                      e.preventDefault();
+                      commitEdit();
+                    }
+                  }
                   if (e.key === 'Escape') cancelEdit();
                   e.stopPropagation();
                 }}
@@ -6433,7 +6843,7 @@ export function WhiteboardPage({
                     activeEditingNode.width * camera.zoom,
                     120,
                   ),
-                  height: Math.max(activeEditingNode.height * camera.zoom, 36),
+                  minHeight: Math.max(activeEditingNode.height * camera.zoom, 36),
                   fontSize: Math.max(13 * camera.zoom, 12),
                   fontFamily:
                     activeEditingNode.shape === 'note'
@@ -6450,6 +6860,7 @@ export function WhiteboardPage({
                   padding: '4px 8px',
                   zIndex: 100,
                   boxShadow: '0 4px 16px rgba(105,101,219,0.22)',
+                  resize: 'both',
                 }}
               />
             )}
@@ -6474,6 +6885,22 @@ export function WhiteboardPage({
                 </button>
               </div>
             )}
+            <Minimap
+              nodes={nodes}
+              arrows={arrows}
+              strokes={strokes}
+              camera={camera}
+              canvasViewport={canvasViewport}
+              onPanTo={(worldX, worldY) =>
+                setCamera((c) => ({
+                  ...c,
+                  x: worldX,
+                  y: worldY,
+                }))
+              }
+              visible={showMinimap}
+              onClose={() => setShowMinimap(false)}
+            />
           </div>
 
           <div className="stage-footer">
@@ -6509,6 +6936,37 @@ export function WhiteboardPage({
                 onClick={resetCamera}
               >
                 <Maximize2 size={15} />
+              </button>
+            </div>
+            <div
+              className="canvas-view-controls"
+              aria-label="Canvas view controls"
+            >
+              <button
+                type="button"
+                className={gridMode !== 'none' ? 'is-active' : ''}
+                aria-label={`Grid mode: ${gridMode} (${gridSize}px)`}
+                title={`Grid: ${gridMode} (${gridSize}px) — Click to cycle, Ctrl+'`}
+                onClick={() => {
+                  setGridMode((prev) =>
+                    prev === 'dots'
+                      ? 'lines'
+                      : prev === 'lines'
+                        ? 'none'
+                        : 'dots',
+                  );
+                }}
+              >
+                <Grid size={15} />
+              </button>
+              <button
+                type="button"
+                className={showMinimap ? 'is-active' : ''}
+                aria-label="Toggle minimap"
+                title="Minimap (Ctrl+M)"
+                onClick={() => setShowMinimap((prev) => !prev)}
+              >
+                <MapIcon size={15} />
               </button>
             </div>
             <div className="canvas-hint" id="canvas-hint">
@@ -6553,9 +7011,7 @@ export function WhiteboardPage({
             aiQuota={aiQuota}
             jevWarnings={jevWarnings}
             onGenerate={() => void generateWithAi()}
-            aiModels={aiModels}
-            aiModel={aiModel}
-            onSelectModel={selectAiModel}
+            onSuggestLayout={() => void suggestLayoutWithAi()}
           />
         )}
       </main>

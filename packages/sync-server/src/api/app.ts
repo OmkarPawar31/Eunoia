@@ -3,10 +3,12 @@ import { Elysia } from 'elysia';
 import type { Logger } from 'pino';
 import {
   AI_QUOTA,
+  type AiGenerateResult,
   type AiUsageStore,
   currentMonth,
   generateD2,
   listAiModels,
+  suggestLayoutD2,
 } from "../ai.js";
 import { type AuditStore, recordAudit } from '../audit.js';
 import type { BillingDeps } from '../billing.js';
@@ -83,6 +85,7 @@ import {
   RegisterUserSchema,
   RoomListQuerySchema,
   SnapshotQuerySchema,
+  SuggestLayoutSchema,
   UnlockRoomSchema,
   UpdateMemberSchema,
   UpdateRoomSchema,
@@ -442,6 +445,192 @@ export function createApiApp(
   const metrics = deps.metrics ?? new Metrics();
   const startedAt = deps.startedAt ?? Date.now();
   const log = deps.log;
+
+  type AiAssistRequest = {
+    /** Text the Jev pre-gate judges and post-QA checks against (prompt or layout instruction). */
+    gatePrompt: string;
+    roomId?: string;
+    caller: PublicUser;
+    headers: Record<string, string | undefined>;
+    query: Record<string, unknown>;
+    aiUsage: AiUsageStore;
+    /** Room-ticket HMAC secret (narrowed by the caller). */
+    secret: string;
+    auditAction: 'ai.generated' | 'ai.layout_suggested';
+    produce: () => Promise<AiGenerateResult>;
+  };
+
+  /**
+   * Shared AI-assist pipeline for generate + suggest-layout: tier/quota
+   * resolution, Jev pre-gate, LLM call, advisory post-QA, quota accounting.
+   * Returns an explicit status so routes stay thin.
+   */
+  async function runAiAssist(
+    args: AiAssistRequest,
+  ): Promise<{ status: number; body: unknown }> {
+    // Tier travels like compile: the higher of room and caller tier,
+    // which also selects the monthly quota below.
+    let tier: Tier = args.caller.tier;
+    if (args.roomId) {
+      const access = await requestRoomAccess(
+        manager,
+        deps.workspaces,
+        users,
+        args.roomId,
+        args.headers,
+        args.query,
+        args.secret,
+        'read',
+      );
+      if ('body' in access)
+        return { status: access.status, body: access.body };
+      tier = higherTier(access.room.tier, tier);
+    }
+    const used = await args.aiUsage.getUsage(args.caller.id, currentMonth());
+    const quota = AI_QUOTA[tier];
+    if (used >= quota) {
+      metrics.incAi('quota_exhausted');
+      return {
+        status: 429,
+        body: {
+          error: `Monthly AI quota exhausted (${used}/${quota}). Upgrade for a higher budget.`,
+          code: 'QUOTA_EXHAUSTED',
+        },
+      };
+    }
+    // Jev pre-generation gate: block jailbreaks/spam before spending the
+    // chat-LLM call or quota. Advisory complexity warnings flow through.
+    let preWarnings: string[] = [];
+    let jevUsable = false;
+    let preGateElapsedMs = 0;
+    if (isJevConfigured(config)) {
+      const preGateStart = Date.now();
+      try {
+        const gate = await evaluatePreGate(args.gatePrompt, config);
+        const decision = decidePreGate(
+          gate,
+          config,
+          config.d2CommunityNodeLimit,
+        );
+        if (!decision.allowed) {
+          metrics.incJev(
+            decision.code === "JEV_BLOCKED" ? "blocked" : "low_intent",
+          );
+          await recordAudit(deps.audit, {
+            actorId: args.caller.id,
+            workspaceId: null,
+            action: "ai.jev_blocked",
+            target: args.roomId ?? null,
+          });
+          return {
+            status: 400,
+            body: { error: decision.error, code: decision.code },
+          };
+        }
+        preWarnings = decision.warnings;
+        jevUsable = true;
+        metrics.incJev("pregate_pass");
+      } catch (error) {
+        if (error instanceof JevError) {
+          metrics.incJev("skipped");
+          log?.warn(
+            { err: error instanceof Error ? error.message : error },
+            'jev pre-gate skipped; continuing fail-open',
+          );
+          if (!resolveFailOpen(config)) {
+            return {
+              status: 503,
+              body: {
+                error: "AI guardrails are temporarily unavailable",
+                code: "JEV_UNAVAILABLE",
+              },
+            };
+          }
+        } else {
+          throw error;
+        }
+      } finally {
+        preGateElapsedMs = Date.now() - preGateStart;
+      }
+    }
+    try {
+      const result = await args.produce();
+      // Jev post-generation QA: advisory only — compile is truth. Never
+      // blocks; warnings surface in the editor. Skipped when the
+      // pre-gate already failed (the provider is down, so retrying
+      // would only add latency) or ran long (bounds total Jev time to
+      // roughly two single-attempt budgets).
+      let jev: JevVerdict | undefined;
+      if (!jevUsable) {
+        // Pre-gate "skipped" is already counted; QA never ran.
+      } else if (preGateElapsedMs > resolveJevTimeout(config)) {
+        metrics.incJev("qa_skipped");
+        log?.warn(
+          { preGateElapsedMs },
+          'jev post-QA skipped after a slow pre-gate',
+        );
+      } else {
+        try {
+          const qa = await evaluatePostQa(
+            args.gatePrompt,
+            result.d2,
+            config,
+          );
+          metrics.incJev("success");
+          jev = {
+            matchesIntent: qa.matchesIntent,
+            likelyValid: qa.likelyValid,
+            confidence: qa.matchesConfidence,
+            warnings: [...preWarnings, ...qa.warnings],
+          };
+        } catch (error) {
+          if (!(error instanceof JevError)) throw error;
+          metrics.incJev("qa_skipped");
+          log?.warn(
+            { err: error instanceof Error ? error.message : error },
+            'jev post-QA skipped',
+          );
+        }
+      }
+      if (!jev && preWarnings.length > 0) {
+        jev = {
+          matchesIntent: 2,
+          likelyValid: 1,
+          confidence: 0,
+          warnings: preWarnings,
+        };
+      }
+      // Count only successful generations against the quota.
+      await args.aiUsage.incrementUsage(args.caller.id, currentMonth());
+      metrics.incAi("success");
+      await recordAudit(deps.audit, {
+        actorId: args.caller.id,
+        workspaceId: null,
+        action: args.auditAction,
+        target: args.roomId ?? null,
+      });
+      return {
+        status: 200,
+        body: {
+          ...result,
+          quota: { used: used + 1, limit: quota },
+          ...toJevField(jev, log),
+        },
+      };
+    } catch (error) {
+      metrics.incAi('error');
+      const message =
+        error instanceof Error ? error.message : 'AI generation failed';
+      const configured = message === 'AI is not configured';
+      return {
+        status: configured ? 503 : 502,
+        body: {
+          error: message,
+          code: configured ? 'AI_NOT_CONFIGURED' : 'AI_PROVIDER_ERROR',
+        },
+      };
+    }
+  }
   const version = deps.version ?? appVersion();
   const getStats =
     deps.getStats ??
@@ -1139,163 +1328,64 @@ export function createApiApp(
           set.status = 401;
           return { error: 'Authentication required', code: 'AUTH_REQUIRED' };
         }
-        // Tier travels like compile: the higher of room and caller tier,
-        // which also selects the monthly quota below.
-        let tier: Tier = caller.tier;
-        if (parsed.data.roomId) {
-          const access = await requestRoomAccess(
-            manager,
-            deps.workspaces,
-            users,
-            parsed.data.roomId,
-            headers as Record<string, string | undefined>,
-            query as Record<string, unknown>,
-            ticketSecret,
-            'read',
-          );
-          if ('body' in access) {
-            set.status = access.status;
-            return access.body;
-          }
-          tier = higherTier(access.room.tier, tier);
-        }
-        const used = await aiUsage.getUsage(caller.id, currentMonth());
-        const quota = AI_QUOTA[tier];
-        if (used >= quota) {
-          metrics.incAi('quota_exhausted');
-          set.status = 429;
+        const outcome = await runAiAssist({
+          gatePrompt: parsed.data.prompt,
+          roomId: parsed.data.roomId,
+          caller,
+          headers: headers as Record<string, string | undefined>,
+          query: query as Record<string, unknown>,
+          aiUsage,
+          secret: ticketSecret,
+          auditAction: 'ai.generated',
+          produce: () => generateD2(parsed.data.prompt, config),
+        });
+        set.status = outcome.status;
+        return outcome.body;
+      })
+      .post('/api/ai/suggest-layout', async ({ body, headers, query, set }) => {
+        if (!config.aiApiKey) {
+          set.status = 503;
           return {
-            error: `Monthly AI quota exhausted (${used}/${quota}). Upgrade for a higher budget.`,
-            code: 'QUOTA_EXHAUSTED',
+            error: 'AI generation is not configured',
+            code: 'AI_NOT_CONFIGURED',
           };
         }
-        // Jev pre-generation gate: block jailbreaks/spam before spending the
-        // chat-LLM call or quota. Advisory complexity warnings flow through.
-        let preWarnings: string[] = [];
-        let jevUsable = false;
-        let preGateElapsedMs = 0;
-        if (isJevConfigured(config)) {
-          const preGateStart = Date.now();
-          try {
-            const gate = await evaluatePreGate(parsed.data.prompt, config);
-            const decision = decidePreGate(
-              gate,
-              config,
-              config.d2CommunityNodeLimit,
-            );
-            if (!decision.allowed) {
-              metrics.incJev(
-                decision.code === "JEV_BLOCKED" ? "blocked" : "low_intent",
-              );
-              await recordAudit(deps.audit, {
-                actorId: caller.id,
-                workspaceId: null,
-                action: "ai.jev_blocked",
-                target: parsed.data.roomId ?? null,
-              });
-              set.status = 400;
-              return { error: decision.error, code: decision.code };
-            }
-            preWarnings = decision.warnings;
-            jevUsable = true;
-            metrics.incJev("pregate_pass");
-          } catch (error) {
-            if (error instanceof JevError) {
-              metrics.incJev("skipped");
-              log?.warn(
-                { err: error instanceof Error ? error.message : error },
-                'jev pre-gate skipped; continuing fail-open',
-              );
-              if (!resolveFailOpen(config)) {
-                set.status = 503;
-                return {
-                  error: "AI guardrails are temporarily unavailable",
-                  code: "JEV_UNAVAILABLE",
-                };
-              }
-            } else {
-              throw error;
-            }
-          } finally {
-            preGateElapsedMs = Date.now() - preGateStart;
-          }
-        }
-        try {
-          const result = await generateD2(
-            parsed.data.prompt,
-            config,
-            parsed.data.model,
-          );
-          // Jev post-generation QA: advisory only — compile is truth. Never
-          // blocks; warnings surface in the editor. Skipped when the
-          // pre-gate already failed (the provider is down, so retrying
-          // would only add latency) or ran long (bounds total Jev time to
-          // roughly two single-attempt budgets).
-          let jev: JevVerdict | undefined;
-          if (!jevUsable) {
-            // Pre-gate "skipped" is already counted; QA never ran.
-          } else if (preGateElapsedMs > resolveJevTimeout(config)) {
-            metrics.incJev("qa_skipped");
-            log?.warn(
-              { preGateElapsedMs },
-              'jev post-QA skipped after a slow pre-gate',
-            );
-          } else {
-            try {
-              const qa = await evaluatePostQa(
-                parsed.data.prompt,
-                result.d2,
-                config,
-              );
-              metrics.incJev("success");
-              jev = {
-                matchesIntent: qa.matchesIntent,
-                likelyValid: qa.likelyValid,
-                confidence: qa.matchesConfidence,
-                warnings: [...preWarnings, ...qa.warnings],
-              };
-            } catch (error) {
-              if (!(error instanceof JevError)) throw error;
-              metrics.incJev("qa_skipped");
-              log?.warn(
-                { err: error instanceof Error ? error.message : error },
-                'jev post-QA skipped',
-              );
-            }
-          }
-          if (!jev && preWarnings.length > 0) {
-            jev = {
-              matchesIntent: 2,
-              likelyValid: 1,
-              confidence: 0,
-              warnings: preWarnings,
-            };
-          }
-          // Count only successful generations against the quota.
-          await aiUsage.incrementUsage(caller.id, currentMonth());
-          metrics.incAi("success");
-          await recordAudit(deps.audit, {
-            actorId: caller.id,
-            workspaceId: null,
-            action: "ai.generated",
-            target: parsed.data.roomId ?? null,
-          });
+        const layoutUsage = deps.aiUsage;
+        if (!layoutUsage) {
+          set.status = 503;
           return {
-            ...result,
-            quota: { used: used + 1, limit: quota },
-            ...toJevField(jev, log),
-          };
-        } catch (error) {
-          metrics.incAi('error');
-          const message =
-            error instanceof Error ? error.message : 'AI generation failed';
-          const configured = message === 'AI is not configured';
-          set.status = configured ? 503 : 502;
-          return {
-            error: message,
-            code: configured ? 'AI_NOT_CONFIGURED' : 'AI_PROVIDER_ERROR',
+            error: 'AI generation is not configured',
+            code: 'AI_NOT_CONFIGURED',
           };
         }
+        const parsed = SuggestLayoutSchema.safeParse(body);
+        if (!parsed.success) {
+          set.status = 400;
+          return validationError(parsed.error);
+        }
+        const caller = await requestUser(
+          users,
+          headers as Record<string, string | undefined>,
+          ticketSecret,
+        );
+        if (!caller) {
+          set.status = 401;
+          return { error: 'Authentication required', code: 'AUTH_REQUIRED' };
+        }
+        const outcome = await runAiAssist({
+          gatePrompt: parsed.data.instruction,
+          roomId: parsed.data.roomId,
+          caller,
+          headers: headers as Record<string, string | undefined>,
+          query: query as Record<string, unknown>,
+          aiUsage: layoutUsage,
+          secret: ticketSecret,
+          auditAction: 'ai.layout_suggested',
+          produce: () =>
+            suggestLayoutD2(parsed.data.d2, parsed.data.instruction, config),
+        });
+        set.status = outcome.status;
+        return outcome.body;
       })
       .post(
         '/api/rooms/:roomId/images/request-upload',

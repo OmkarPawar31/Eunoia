@@ -3,6 +3,7 @@
 import type { PointerEvent as ReactPointerEvent, KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { BoardNode } from '@/lib/whiteboard/board-types';
 import { normalizeRotation } from '@/lib/whiteboard/geometry';
+import { wrapSvgText } from '@/lib/whiteboard/text-wrap';
 
 type CanvasNodeProps = {
   node: BoardNode;
@@ -50,6 +51,25 @@ export function CanvasNode({
   const diamondPoints = isDiamond
     ? `${centerX},${node.y} ${node.x + node.width},${centerY} ${centerX},${node.y + node.height} ${node.x},${centerY}`
     : null;
+
+  const fontSize = isText
+    ? (node.fontSize ?? Math.max(14, Math.round(node.height * 0.65)))
+    : isNote
+      ? 18
+      : 19;
+  const paddingX = isText ? 0 : 18;
+  const availableWidth = Math.max(20, node.width - paddingX * 2);
+  const labelLines = wrapSvgText(node.label, availableWidth, fontSize);
+
+  const lineHeight = Math.round(fontSize * 1.25);
+  const startY = isText
+    ? node.y + Math.round(fontSize * 0.9)
+    : isNote
+      ? node.y + 38
+      : node.y + (labelLines.length > 1 ? 30 : 43);
+
+  const detailStartY = startY + (labelLines.length > 0 ? (labelLines.length - 1) * lineHeight + 26 : 26);
+  const detailLines = node.detail ? wrapSvgText(node.detail, availableWidth, 10) : [];
 
   return (
     <g
@@ -171,30 +191,41 @@ export function CanvasNode({
           style={shapeStyle}
         />
       )}
-      {!isImage && !isLine && (
+      {!isImage && !isLine && labelLines.length > 0 && (
         <text
           className={`node-label ${isText ? 'node-label--text' : ''}`}
           x={node.x + (isText ? 0 : 18)}
-          y={
-            node.y +
-            (isText ? Math.round(node.height * 0.72) : isNote ? 42 : 43)
-          }
+          y={startY}
           style={{
-            fontSize: isText
-              ? `${node.fontSize ?? Math.max(14, Math.round(node.height * 0.65))}px`
-              : undefined,
+            fontSize: `${fontSize}px`,
           }}
         >
-          {node.label}
+          {labelLines.map((line, idx) => (
+            <tspan
+              key={idx}
+              x={node.x + (isText ? 0 : 18)}
+              dy={idx === 0 ? 0 : `${lineHeight}px`}
+            >
+              {line}
+            </tspan>
+          ))}
         </text>
       )}
-      {!isText && !isImage && !isLine && (
+      {!isText && !isImage && !isLine && detailLines.length > 0 && (
         <text
           className="node-detail"
           x={node.x + 18}
-          y={node.y + (isNote ? 70 : 68)}
+          y={detailStartY}
         >
-          {node.detail}
+          {detailLines.map((line, idx) => (
+            <tspan
+              key={idx}
+              x={node.x + 18}
+              dy={idx === 0 ? 0 : '14px'}
+            >
+              {line}
+            </tspan>
+          ))}
         </text>
       )}
     </g>

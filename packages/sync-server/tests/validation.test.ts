@@ -3,6 +3,7 @@ import {
   CompileRequestSchema,
   CursorTelemetrySchema,
   SnapshotQuerySchema,
+  SuggestLayoutSchema,
 } from "../src/api/schemas.js";
 import { compileD2 } from "../src/d2-compiler.js";
 
@@ -41,6 +42,19 @@ describe("request schemas", () => {
     expect(SnapshotQuerySchema.parse({ limit: "5" })).toEqual({ limit: 5 });
     expect(() => SnapshotQuerySchema.parse({ limit: "500" })).toThrow();
     expect(() => SnapshotQuerySchema.parse({ before: "not-a-date" })).toThrow();
+  });
+
+  test("bounds layout suggestions and defaults the instruction", () => {
+    expect(
+      SuggestLayoutSchema.safeParse({ d2: "a -> b" }).success,
+    ).toBe(true);
+    expect(
+      SuggestLayoutSchema.parse({ d2: "a -> b" }).instruction,
+    ).toBe("Improve the layout of this diagram");
+    expect(SuggestLayoutSchema.safeParse({ d2: "   " }).success).toBe(false);
+    expect(SuggestLayoutSchema.safeParse({ d2: "a -> b", debug: true }).success).toBe(
+      false,
+    );
   });
 
   test("rejects malformed responses from the D2 compiler", async () => {

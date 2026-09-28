@@ -370,3 +370,115 @@ export function rotatedNodeAabb(
   }
   return { minX, minY, maxX, maxY };
 }
+
+export type AlignType =
+  | 'left'
+  | 'center'
+  | 'right'
+  | 'top'
+  | 'middle'
+  | 'bottom';
+
+export type DistributeAxis = 'horizontal' | 'vertical';
+
+export type AlignableNode = {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  [key: string]: unknown;
+};
+
+/**
+ * Aligns a collection of nodes along a bounding-box edge or centerline.
+ */
+export function alignNodes<T extends AlignableNode>(
+  nodes: T[],
+  type: AlignType,
+): T[] {
+  if (nodes.length < 2) return nodes.slice();
+
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  for (const n of nodes) {
+    if (n.x < minX) minX = n.x;
+    if (n.x + n.width > maxX) maxX = n.x + n.width;
+    if (n.y < minY) minY = n.y;
+    if (n.y + n.height > maxY) maxY = n.y + n.height;
+  }
+
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+
+  return nodes.map((node) => {
+    switch (type) {
+      case 'left':
+        return { ...node, x: minX };
+      case 'center':
+        return { ...node, x: Math.round(centerX - node.width / 2) };
+      case 'right':
+        return { ...node, x: maxX - node.width };
+      case 'top':
+        return { ...node, y: minY };
+      case 'middle':
+        return { ...node, y: Math.round(centerY - node.height / 2) };
+      case 'bottom':
+        return { ...node, y: maxY - node.height };
+    }
+  });
+}
+
+/**
+ * Distributes nodes evenly along the horizontal or vertical axis between
+ * the outer boundaries of the selection.
+ */
+export function distributeNodes<T extends AlignableNode>(
+  nodes: T[],
+  axis: DistributeAxis,
+): T[] {
+  if (nodes.length < 3) return nodes.slice();
+
+  if (axis === 'horizontal') {
+    const sorted = [...nodes].sort((a, b) => a.x - b.x);
+    const first = sorted[0];
+    const last = sorted[sorted.length - 1];
+    const totalSpan = last.x + last.width - first.x;
+    const totalNodeWidth = sorted.reduce((sum, n) => sum + n.width, 0);
+    const totalGap = totalSpan - totalNodeWidth;
+    const gap = totalGap / (sorted.length - 1);
+
+    let currentX = first.x;
+    const updated = new Map<string, number>();
+    for (const node of sorted) {
+      updated.set(node.id, Math.round(currentX));
+      currentX += node.width + gap;
+    }
+    return nodes.map((n) => ({
+      ...n,
+      x: updated.get(n.id) ?? n.x,
+    }));
+  } else {
+    const sorted = [...nodes].sort((a, b) => a.y - b.y);
+    const first = sorted[0];
+    const last = sorted[sorted.length - 1];
+    const totalSpan = last.y + last.height - first.y;
+    const totalNodeHeight = sorted.reduce((sum, n) => sum + n.height, 0);
+    const totalGap = totalSpan - totalNodeHeight;
+    const gap = totalGap / (sorted.length - 1);
+
+    let currentY = first.y;
+    const updated = new Map<string, number>();
+    for (const node of sorted) {
+      updated.set(node.id, Math.round(currentY));
+      currentY += node.height + gap;
+    }
+    return nodes.map((n) => ({
+      ...n,
+      y: updated.get(n.id) ?? n.y,
+    }));
+  }
+}
