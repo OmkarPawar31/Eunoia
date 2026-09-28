@@ -47,9 +47,7 @@ export class MemorySubscriptionStore implements SubscriptionStore {
   private readonly byUserId = new Map<string, SubscriptionRecord>();
   private readonly byCustomerId = new Map<string, string>();
 
-  async upsertByUserId(
-    input: UpsertSubscription,
-  ): Promise<SubscriptionRecord> {
+  async upsertByUserId(input: UpsertSubscription): Promise<SubscriptionRecord> {
     const now = new Date();
     const existing = this.byUserId.get(input.userId);
     const record: SubscriptionRecord = {
@@ -98,9 +96,7 @@ export class MemoryBillingEventStore implements BillingEventStore {
 export class PrismaSubscriptionStore implements SubscriptionStore {
   constructor(private readonly prisma: PrismaClient) {}
 
-  async upsertByUserId(
-    input: UpsertSubscription,
-  ): Promise<SubscriptionRecord> {
+  async upsertByUserId(input: UpsertSubscription): Promise<SubscriptionRecord> {
     const row = await this.prisma.subscription.upsert({
       where: { userId: input.userId },
       create: {
@@ -207,4 +203,3 @@ export {
   MemorySubscriptionStore as MemoryBillingStore,
   PrismaSubscriptionStore as PrismaBillingStore,
 };
-

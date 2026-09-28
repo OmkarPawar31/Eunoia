@@ -22,9 +22,7 @@ export function roleAtLeast(
 }
 
 export function isWorkspaceRole(value: unknown): value is WorkspaceRole {
-  return (
-    value === "ADMIN" || value === "EDITOR" || value === "VIEWER"
-  );
+  return value === "ADMIN" || value === "EDITOR" || value === "VIEWER";
 }
 
 export type WorkspaceRecord = {
@@ -126,7 +124,8 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       if (membership) result.push({ workspace, role: membership.role });
     }
     return result.sort(
-      (a, b) => b.workspace.createdAt.getTime() - a.workspace.createdAt.getTime(),
+      (a, b) =>
+        b.workspace.createdAt.getTime() - a.workspace.createdAt.getTime(),
     );
   }
 
@@ -140,10 +139,7 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     }
   }
 
-  async createFolder(
-    workspaceId: string,
-    name: string,
-  ): Promise<FolderRecord> {
+  async createFolder(workspaceId: string, name: string): Promise<FolderRecord> {
     const folder: FolderRecord = {
       id: randomUUID(),
       workspaceId,
@@ -191,10 +187,7 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     return record;
   }
 
-  async removeMembership(
-    workspaceId: string,
-    userId: string,
-  ): Promise<void> {
+  async removeMembership(workspaceId: string, userId: string): Promise<void> {
     this.memberships.delete(
       MemoryWorkspaceStore.membershipKey(workspaceId, userId),
     );
@@ -269,10 +262,7 @@ export class PrismaWorkspaceStore implements WorkspaceStore {
     await this.prisma.workspace.delete({ where: { id } });
   }
 
-  async createFolder(
-    workspaceId: string,
-    name: string,
-  ): Promise<FolderRecord> {
+  async createFolder(workspaceId: string, name: string): Promise<FolderRecord> {
     return (await this.prisma.folder.create({
       data: { workspaceId, name },
     })) as unknown as FolderRecord;
@@ -308,10 +298,7 @@ export class PrismaWorkspaceStore implements WorkspaceStore {
     })) as unknown as MembershipRecord;
   }
 
-  async removeMembership(
-    workspaceId: string,
-    userId: string,
-  ): Promise<void> {
+  async removeMembership(workspaceId: string, userId: string): Promise<void> {
     await this.prisma.membership
       .delete({ where: { workspaceId_userId: { workspaceId, userId } } })
       .catch(() => undefined);

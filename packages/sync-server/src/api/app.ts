@@ -1,21 +1,25 @@
-import { node } from "@elysiajs/node";
-import { Elysia } from "elysia";
-import type { Config } from "../config.js";
-import { CompileRequestError, compileD2, type Tier } from "../d2-compiler.js";
+import { node } from '@elysiajs/node';
+import { Elysia } from 'elysia';
 import {
   AI_QUOTA,
+  type AiUsageStore,
   currentMonth,
   generateD2,
   listAiModels,
   type AiUsageStore,
 } from "../ai.js";
+} from '../ai.js';
+import { type AuditStore, recordAudit } from '../audit.js';
+import type { BillingDeps } from '../billing.js';
+import type { Config } from '../config.js';
+import { CompileRequestError, compileD2, type Tier } from '../d2-compiler.js';
 import {
   type DependencyCheck,
   type HealthChecks,
   imageStorageCheck,
   jevCheck,
   summarizeReadiness,
-} from "../health.js";
+} from '../health.js';
 import {
   decidePreGate,
   evaluatePostQa,
@@ -27,31 +31,21 @@ import {
 } from "../jev.js";
 import {
   buildImageKey,
-  isR2NotFound,
   type ImageDeps,
+  isR2NotFound,
   keyBelongsToRoom,
   type ObjectHead,
-} from "../images.js";
-import { Metrics } from "../metrics.js";
-import { appVersion } from "../version.js";
-import type { RoomMetadata } from "../RoomLoader.js";
-import type { RoomManager } from "../RoomManager.js";
+} from '../images.js';
+import { Metrics } from '../metrics.js';
+import type { RoomMetadata } from '../RoomLoader.js';
+import type { RoomManager } from '../RoomManager.js';
 import {
   authorizeRoom,
   extractTicket,
   hashPassword,
   issueTicket,
   verifyPassword,
-} from "../room-auth.js";
-import { issueUserToken, verifyUserToken } from "../user-auth.js";
-import type { PublicUser, UserStore } from "../users.js";
-import type { BillingDeps } from "../billing.js";
-import {
-  roleAtLeast,
-  type WorkspaceRole,
-  type WorkspaceStore,
-} from "../workspaces.js";
-import { recordAudit, type AuditStore } from "../audit.js";
+} from '../room-auth.js';
 import {
   discoveryDocument,
   exchangeCode,
@@ -62,7 +56,15 @@ import {
   pkceChallenge,
   sealState,
   verifyIdToken,
-} from "../sso.js";
+} from '../sso.js';
+import { issueUserToken, verifyUserToken } from '../user-auth.js';
+import type { PublicUser, UserStore } from '../users.js';
+import { appVersion } from '../version.js';
+import {
+  roleAtLeast,
+  type WorkspaceRole,
+  type WorkspaceStore,
+} from '../workspaces.js';
 import {
   CheckoutSchema,
   CompileRequestSchema,
@@ -84,7 +86,7 @@ import {
   UpdateMemberSchema,
   UpdateRoomSchema,
   validationError,
-} from "./schemas.js";
+} from './schemas.js';
 
 export type { ImageDeps };
 
@@ -103,19 +105,19 @@ async function requestAccess(
     manager,
     roomId,
     extractTicket(headers, query),
-    typeof query["ticket"] === "string" && query["ticket"]
-      ? query["ticket"]
+    typeof query['ticket'] === 'string' && query['ticket']
+      ? query['ticket']
       : undefined,
     secret,
   );
-  if (access.status === "ok") return { room: access.room };
-  return access.status === "missing"
-    ? { status: 404, body: { error: "Room not found", code: "ROOM_NOT_FOUND" } }
+  if (access.status === 'ok') return { room: access.room };
+  return access.status === 'missing'
+    ? { status: 404, body: { error: 'Room not found', code: 'ROOM_NOT_FOUND' } }
     : {
         status: 401,
         body: {
-          error: "Room requires a valid access ticket",
-          code: "ROOM_LOCKED",
+          error: 'Room requires a valid access ticket',
+          code: 'ROOM_LOCKED',
         },
       };
 }
@@ -123,8 +125,8 @@ async function requestAccess(
 function r2Error(set: { status?: unknown }, error: unknown) {
   set.status = 502;
   return {
-    error: error instanceof Error ? error.message : "Image storage failed",
-    code: "R2_ERROR",
+    error: error instanceof Error ? error.message : 'Image storage failed',
+    code: 'R2_ERROR',
   };
 }
 
@@ -153,7 +155,7 @@ async function requestUser(
 ): Promise<PublicUser | null> {
   const candidates = [
     bearerToken(headers.authorization),
-    headers["x-user-token"],
+    headers['x-user-token'],
   ];
   for (const token of candidates) {
     if (!token) continue;
@@ -166,16 +168,16 @@ async function requestUser(
 }
 
 function bearerToken(authorization: string | undefined): string | undefined {
-  if (typeof authorization !== "string") return undefined;
-  const [scheme, token] = authorization.split(" ");
-  return scheme?.toLowerCase() === "bearer" && token ? token : undefined;
+  if (typeof authorization !== 'string') return undefined;
+  const [scheme, token] = authorization.split(' ');
+  return scheme?.toLowerCase() === 'bearer' && token ? token : undefined;
 }
 
 export type RoomAccess =
   | {
       room: RoomMetadata;
       /** OWNER for room owners; workspace role for members; null otherwise. */
-      role: "OWNER" | WorkspaceRole | null;
+      role: 'OWNER' | WorkspaceRole | null;
     }
   | { status: 401 | 403 | 404; body: { error: string; code: string } };
 
@@ -192,17 +194,12 @@ async function requestRoomAccess(
   headers: Record<string, string | undefined>,
   query: Record<string, unknown>,
   secret: string,
-  need: "read" | "write",
+  need: 'read' | 'write',
 ): Promise<RoomAccess> {
   const access = await requestAccess(manager, roomId, headers, query, secret);
-  const caller =
-    (await requestUser(users, headers, secret)) ?? undefined;
-  if (!("body" in access)) {
-    const role = await resolveRoomRole(
-      workspaces,
-      access.room,
-      caller?.id,
-    );
+  const caller = (await requestUser(users, headers, secret)) ?? undefined;
+  if (!('body' in access)) {
+    const role = await resolveRoomRole(workspaces, access.room, caller?.id);
     return { room: access.room, role };
   }
   // Ticket path failed: fall back to workspace membership (if any).
@@ -215,8 +212,8 @@ async function requestRoomAccess(
   );
   const ws = await workspaces.getWorkspace(room.workspaceId);
   const role: WorkspaceRole | null =
-    ws?.ownerId === caller.id ? "ADMIN" : (membership?.role ?? null);
-  const minimum: WorkspaceRole = need === "read" ? "VIEWER" : "EDITOR";
+    ws?.ownerId === caller.id ? 'ADMIN' : (membership?.role ?? null);
+  const minimum: WorkspaceRole = need === 'read' ? 'VIEWER' : 'EDITOR';
   if (!roleAtLeast(role, minimum)) return access;
   return { room, role };
 }
@@ -225,15 +222,16 @@ async function resolveRoomRole(
   workspaces: WorkspaceStore | undefined,
   room: RoomMetadata,
   callerId: string | undefined,
-): Promise<"OWNER" | WorkspaceRole | null> {
-  if (callerId && room.ownerId !== "anonymous" && room.ownerId === callerId)
-    return "OWNER";
+): Promise<'OWNER' | WorkspaceRole | null> {
+  if (callerId && room.ownerId !== 'anonymous' && room.ownerId === callerId)
+    return 'OWNER';
   if (!workspaces || !room.workspaceId || !callerId) return null;
   const ws = await workspaces.getWorkspace(room.workspaceId);
   if (!ws) return null;
-  if (ws.ownerId === callerId) return "ADMIN";
-  return (await workspaces.getMembership(room.workspaceId, callerId))?.role ??
-    null;
+  if (ws.ownerId === callerId) return 'ADMIN';
+  return (
+    (await workspaces.getMembership(room.workspaceId, callerId))?.role ?? null
+  );
 }
 
 /**
@@ -248,37 +246,36 @@ async function requireRoomMutation(
   headers: Record<string, string | undefined>,
   secret: string,
 ): Promise<
-  | { owner: PublicUser; role: "OWNER" | "ADMIN"; claimed: boolean }
+  | { owner: PublicUser; role: 'OWNER' | 'ADMIN'; claimed: boolean }
   | { status: 401 | 403; body: { error: string; code: string } }
 > {
   const caller = await requestUser(users, headers, secret);
   if (!caller) {
     return {
       status: 401,
-      body: { error: "Authentication required", code: "AUTH_REQUIRED" },
+      body: { error: 'Authentication required', code: 'AUTH_REQUIRED' },
     };
   }
-  if (room.ownerId !== "anonymous" && room.ownerId === caller.id) {
-    return { owner: caller, role: "OWNER", claimed: false };
+  if (room.ownerId !== 'anonymous' && room.ownerId === caller.id) {
+    return { owner: caller, role: 'OWNER', claimed: false };
   }
   if (room.workspaceId && workspaces) {
     const ws = await workspaces.getWorkspace(room.workspaceId);
     const role: WorkspaceRole | null =
       ws?.ownerId === caller.id
-        ? "ADMIN"
-        : (
-            await workspaces.getMembership(room.workspaceId, caller.id)
-          )?.role ?? null;
-    if (role === "ADMIN") {
-      return { owner: caller, role: "ADMIN", claimed: false };
+        ? 'ADMIN'
+        : ((await workspaces.getMembership(room.workspaceId, caller.id))
+            ?.role ?? null);
+    if (role === 'ADMIN') {
+      return { owner: caller, role: 'ADMIN', claimed: false };
     }
   }
-  if (room.ownerId === "anonymous" && !room.workspaceId) {
-    return { owner: caller, role: "OWNER", claimed: true };
+  if (room.ownerId === 'anonymous' && !room.workspaceId) {
+    return { owner: caller, role: 'OWNER', claimed: true };
   }
   return {
     status: 403,
-    body: { error: "Only the room owner may do this", code: "FORBIDDEN" },
+    body: { error: 'Only the room owner may do this', code: 'FORBIDDEN' },
   };
 }
 
@@ -287,7 +284,7 @@ function toRoomSummary(room: RoomMetadata): {
   id: string;
   name: string;
   ownerId: string;
-  tier: RoomMetadata["tier"];
+  tier: RoomMetadata['tier'];
   workspaceId: string | null;
   folderId: string | null;
   hasPassword: boolean;
@@ -326,14 +323,14 @@ export type ApiDeps = {
 
 /** Post-auth landing path: same rules as the frontend AuthForm. */
 function sanitizeNext(next: string | null): string {
-  if (!next || !next.startsWith("/") || next.startsWith("//")) return "/board";
+  if (!next || !next.startsWith('/') || next.startsWith('//')) return '/board';
   return next.slice(0, 500);
 }
 
 function parseCookies(header: string): Record<string, string> {
   const cookies: Record<string, string> = {};
-  for (const part of header.split(";")) {
-    const index = part.indexOf("=");
+  for (const part of header.split(';')) {
+    const index = part.indexOf('=');
     if (index <= 0) continue;
     cookies[part.slice(0, index).trim()] = part.slice(index + 1).trim();
   }
@@ -361,25 +358,25 @@ async function requireWorkspaceRole(
   if (!caller) {
     return {
       status: 401,
-      body: { error: "Authentication required", code: "AUTH_REQUIRED" },
+      body: { error: 'Authentication required', code: 'AUTH_REQUIRED' },
     };
   }
   const workspace = await workspaces.getWorkspace(workspaceId);
   if (!workspace) {
     return {
       status: 404,
-      body: { error: "Workspace not found", code: "WORKSPACE_NOT_FOUND" },
+      body: { error: 'Workspace not found', code: 'WORKSPACE_NOT_FOUND' },
     };
   }
   const role: WorkspaceRole | null =
     workspace.ownerId === caller.id
-      ? "ADMIN"
+      ? 'ADMIN'
       : ((await workspaces.getMembership(workspaceId, caller.id))?.role ??
         null);
   if (!roleAtLeast(role, minRole) || !role) {
     return {
       status: 403,
-      body: { error: "Insufficient workspace role", code: "FORBIDDEN" },
+      body: { error: 'Insufficient workspace role', code: 'FORBIDDEN' },
     };
   }
   return { workspaceId, role };
@@ -404,7 +401,7 @@ async function workspaceSeatLimit(
 }
 
 const skippedCheck = async (): Promise<DependencyCheck> => ({
-  status: "skipped",
+  status: 'skipped',
 });
 
 export function createApiApp(
@@ -415,42 +412,45 @@ export function createApiApp(
   deps: ApiDeps = {},
 ) {
   const ticketSecret = config.roomTicketSecret;
-  if (!ticketSecret) throw new Error("roomTicketSecret is required");
+  if (!ticketSecret) throw new Error('roomTicketSecret is required');
   const health: HealthChecks = deps.health ?? {
     checkDatabase: skippedCheck,
     checkRedis: skippedCheck,
     checkCompiler: skippedCheck,
+    checkImageStorage: skippedCheck,
   };
   const metrics = deps.metrics ?? new Metrics();
   const startedAt = deps.startedAt ?? Date.now();
   const version = deps.version ?? appVersion();
-  const getStats = deps.getStats ?? (() => ({
-    activeRooms: manager.activeRoomCount,
-    wsConnections: 0,
-  }));
+  const getStats =
+    deps.getStats ??
+    (() => ({
+      activeRooms: manager.activeRoomCount,
+      wsConnections: 0,
+    }));
   return (
     new Elysia({ adapter: node() })
       // Never leak plain-text framework/driver errors (e.g. Prisma's
       // `Invalid ...` messages): clients parse every response as JSON, so an
       // unhandled throw must still be a JSON body with a stable shape.
       .onError(({ code, error, set }) => {
-        if (code === "NOT_FOUND") {
+        if (code === 'NOT_FOUND') {
           set.status = 404;
-          return { error: "Not found", code: "NOT_FOUND" };
+          return { error: 'Not found', code: 'NOT_FOUND' };
         }
-        if (code === "VALIDATION" || code === "PARSE") {
+        if (code === 'VALIDATION' || code === 'PARSE') {
           set.status = 400;
           return {
-            error: "Invalid request",
-            code: "VALIDATION_ERROR",
+            error: 'Invalid request',
+            code: 'VALIDATION_ERROR',
             issues: [
               {
-                path: "",
+                path: '',
                 message:
                   error instanceof Error && error.message
                     ? error.message
-                    : "Malformed request body",
-                code: "custom",
+                    : 'Malformed request body',
+                code: 'custom',
               },
             ],
           };
@@ -464,31 +464,31 @@ export function createApiApp(
           };
         }
         const status =
-          typeof set.status === "number" && set.status >= 400
+          typeof set.status === 'number' && set.status >= 400
             ? set.status
             : 500;
         set.status = status;
         const message =
           error instanceof Error && error.message
             ? error.message
-            : "Internal server error";
+            : 'Internal server error';
         // Driver internals stay server-side in production; development keeps
         // the message so local setup problems (missing tables, DB down) are
         // diagnosable from the client.
         return {
           error:
-            config.nodeEnv !== "production" || status < 500
+            config.nodeEnv !== 'production' || status < 500
               ? message
-              : "Internal server error",
-          code: status < 500 ? "BAD_REQUEST" : "INTERNAL_ERROR",
+              : 'Internal server error',
+          code: status < 500 ? 'BAD_REQUEST' : 'INTERNAL_ERROR',
         };
       })
       .onRequest(({ set }) => {
-        set.headers["access-control-allow-origin"] = "*";
-        set.headers["access-control-allow-headers"] =
-          "content-type, authorization, x-user-token";
-        set.headers["access-control-allow-methods"] =
-          "GET, POST, PATCH, DELETE, OPTIONS";
+        set.headers['access-control-allow-origin'] = '*';
+        set.headers['access-control-allow-headers'] =
+          'content-type, authorization, x-user-token';
+        set.headers['access-control-allow-methods'] =
+          'GET, POST, PATCH, DELETE, OPTIONS';
       })
       .onAfterResponse(({ request, set }) => {
         // Single counting point for every response, including errors:
@@ -503,63 +503,72 @@ export function createApiApp(
           // Metrics must never break responses (e.g. malformed URLs).
         }
       })
-      .get("/health", () => ({
-        status: "ok",
+      .get('/health', () => ({
+        status: 'ok',
         version,
         uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
         activeRooms: manager.activeRoomCount,
       }))
-      .get("/readyz", async ({ set }) => {
+      .get('/readyz', async ({ set }) => {
         // Readiness for orchestrators and external probers: every check is
         // bounded and never throws, so this endpoint always answers.
-        const [database, redis, compiler, jev] = await Promise.all([
+        const [database, redis, compiler, imageStorage] = await Promise.all([
           health.checkDatabase().catch(
-            (): DependencyCheck => ({ status: "error", detail: "check failed" }),
+            (): DependencyCheck => ({
+              status: 'error',
+              detail: 'check failed',
+            }),
           ),
           health.checkRedis().catch(
-            (): DependencyCheck => ({ status: "error", detail: "check failed" }),
+            (): DependencyCheck => ({
+              status: 'error',
+              detail: 'check failed',
+            }),
           ),
           health.checkCompiler().catch(
-            (): DependencyCheck => ({ status: "error", detail: "check failed" }),
+            (): DependencyCheck => ({
+              status: 'error',
+              detail: 'check failed',
+            }),
           ),
-          (health.checkJev
-            ? health.checkJev()
-            : Promise.resolve(jevCheck(config))
-          ).catch(
-            (): DependencyCheck => ({ status: "error", detail: "check failed" }),
-          ),
+          (health.checkImageStorage?.().catch(
+            (): DependencyCheck => ({
+              status: 'error',
+              detail: 'check failed',
+            }),
+          ) ?? Promise.resolve(imageStorageCheck(config))),
         ]);
         const readiness = summarizeReadiness(
           database,
           redis,
           compiler,
-          imageStorageCheck(config),
+          imageStorage,
           version,
           (Date.now() - startedAt) / 1000,
           jev,
         );
         // A down database takes the server out of rotation; degraded deps
         // (Redis, compiler) stay routable by design.
-        if (readiness.status === "down") set.status = 503;
+        if (readiness.status === 'down') set.status = 503;
         return readiness;
       })
-      .get("/metrics", ({ set }) => {
+      .get('/metrics', ({ set }) => {
         const stats = getStats();
-        set.headers["content-type"] = "text/plain; version=0.0.4";
+        set.headers['content-type'] = 'text/plain; version=0.0.4';
         return metrics.render({
           activeRooms: stats.activeRooms,
           wsConnections: stats.wsConnections,
           uptimeSec: (Date.now() - startedAt) / 1000,
         });
       })
-      .post("/api/rooms", async ({ body, headers, set }) => {
+      .post('/api/rooms', async ({ body, headers, set }) => {
         const parsed = CreateRoomSchema.safeParse(body);
         if (!parsed.success) {
           set.status = 400;
-          if (parsed.error.issues.some((issue) => issue.path[0] === "password"))
+          if (parsed.error.issues.some((issue) => issue.path[0] === 'password'))
             return {
-              error: "Password must be at least 8 characters",
-              code: "INVALID_PASSWORD",
+              error: 'Password must be at least 8 characters',
+              code: 'INVALID_PASSWORD',
             };
           return validationError(parsed.error);
         }
@@ -573,12 +582,12 @@ export function createApiApp(
           headers as Record<string, string | undefined>,
           ticketSecret,
         );
-        const callerTier = user?.tier ?? "COMMUNITY";
+        const callerTier = user?.tier ?? 'COMMUNITY';
         if (input.tier && TIER_RANK[input.tier] > TIER_RANK[callerTier]) {
           set.status = 403;
           return {
             error: `The '${input.tier}' tier requires a Pro or Enterprise account`,
-            code: "TIER_UPGRADE_REQUIRED",
+            code: 'TIER_UPGRADE_REQUIRED',
             details: { tier: input.tier },
           };
         }
@@ -592,15 +601,15 @@ export function createApiApp(
           if (!user) {
             set.status = 401;
             return {
-              error: "Authentication required",
-              code: "AUTH_REQUIRED",
+              error: 'Authentication required',
+              code: 'AUTH_REQUIRED',
             };
           }
           if (!deps.workspaces) {
             set.status = 503;
             return {
-              error: "Workspaces are not configured",
-              code: "WORKSPACES_NOT_CONFIGURED",
+              error: 'Workspaces are not configured',
+              code: 'WORKSPACES_NOT_CONFIGURED',
             };
           }
           const wsAccess = await requireWorkspaceRole(
@@ -609,9 +618,9 @@ export function createApiApp(
             input.workspaceId,
             headers as Record<string, string | undefined>,
             ticketSecret,
-            "EDITOR",
+            'EDITOR',
           );
-          if ("body" in wsAccess) {
+          if ('body' in wsAccess) {
             set.status = wsAccess.status;
             return wsAccess.body;
           }
@@ -620,7 +629,7 @@ export function createApiApp(
         const room = await manager.createRoom(
           {
             name: input.name,
-            ownerId: user ? user.id : "anonymous",
+            ownerId: user ? user.id : 'anonymous',
             tier: input.tier ?? callerTier,
             workspaceId,
             folderId: null,
@@ -630,7 +639,7 @@ export function createApiApp(
         set.status = 201;
         return room;
       })
-      .get("/api/rooms/:roomId", async ({ params, headers, query, set }) => {
+      .get('/api/rooms/:roomId', async ({ params, headers, query, set }) => {
         const access = await requestRoomAccess(
           manager,
           deps.workspaces,
@@ -639,25 +648,25 @@ export function createApiApp(
           headers as Record<string, string | undefined>,
           query as Record<string, unknown>,
           ticketSecret,
-          "read",
+          'read',
         );
-        if ("body" in access) {
+        if ('body' in access) {
           set.status = access.status;
           return access.body;
         }
         return access.room;
       })
-      .post("/api/rooms/:roomId/unlock", async ({ params, body, set }) => {
+      .post('/api/rooms/:roomId/unlock', async ({ params, body, set }) => {
         const room = await manager.getRoomMetadata(params.roomId);
         if (!room) {
           set.status = 404;
-          return { error: "Room not found", code: "ROOM_NOT_FOUND" };
+          return { error: 'Room not found', code: 'ROOM_NOT_FOUND' };
         }
         if (!room.hasPassword) {
           // Open rooms need no ticket — minting one would create a capability
           // that survives a later password being set.
           set.status = 400;
-          return { error: "Room is not locked", code: "ROOM_NOT_LOCKED" };
+          return { error: 'Room is not locked', code: 'ROOM_NOT_LOCKED' };
         }
         const parsed = UnlockRoomSchema.safeParse(body);
         if (!parsed.success) {
@@ -670,7 +679,7 @@ export function createApiApp(
           !(await manager.verifyRoomPassword(room.id, input.password))
         ) {
           set.status = 403;
-          return { error: "Invalid password", code: "INVALID_PASSWORD" };
+          return { error: 'Invalid password', code: 'INVALID_PASSWORD' };
         }
         const version = (await manager.getPasswordVersion(room.id)) ?? 0;
         const { ticket, expiresIn } = issueTicket(
@@ -681,7 +690,7 @@ export function createApiApp(
         );
         return { ticket, expiresIn, roomId: room.id };
       })
-      .delete("/api/rooms/:roomId", async ({ params, headers, query, set }) => {
+      .delete('/api/rooms/:roomId', async ({ params, headers, query, set }) => {
         const access = await requestRoomAccess(
           manager,
           deps.workspaces,
@@ -690,9 +699,9 @@ export function createApiApp(
           headers as Record<string, string | undefined>,
           query as Record<string, unknown>,
           ticketSecret,
-          "write",
+          'write',
         );
-        if ("body" in access) {
+        if ('body' in access) {
           set.status = access.status;
           return access.body;
         }
@@ -705,7 +714,7 @@ export function createApiApp(
           headers as Record<string, string | undefined>,
           ticketSecret,
         );
-        if ("body" in ownership) {
+        if ('body' in ownership) {
           set.status = ownership.status;
           return ownership.body;
         }
@@ -718,14 +727,14 @@ export function createApiApp(
         await recordAudit(deps.audit, {
           actorId: deleter?.id ?? null,
           workspaceId: access.room.workspaceId,
-          action: "room.delete",
+          action: 'room.delete',
           target: access.room.id,
         });
         set.status = 204;
         return;
       })
       .patch(
-        "/api/rooms/:roomId",
+        '/api/rooms/:roomId',
         async ({ params, body, headers, query, set }) => {
           const access = await requestRoomAccess(
             manager,
@@ -735,9 +744,9 @@ export function createApiApp(
             headers as Record<string, string | undefined>,
             query as Record<string, unknown>,
             ticketSecret,
-            "write",
+            'write',
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
@@ -745,11 +754,11 @@ export function createApiApp(
           if (!parsed.success) {
             set.status = 400;
             if (
-              parsed.error.issues.some((issue) => issue.path[0] === "password")
+              parsed.error.issues.some((issue) => issue.path[0] === 'password')
             )
               return {
-                error: "Password must be at least 8 characters",
-                code: "INVALID_PASSWORD",
+                error: 'Password must be at least 8 characters',
+                code: 'INVALID_PASSWORD',
               };
             return validationError(parsed.error);
           }
@@ -761,7 +770,7 @@ export function createApiApp(
             headers as Record<string, string | undefined>,
             ticketSecret,
           );
-          if ("body" in ownership) {
+          if ('body' in ownership) {
             set.status = ownership.status;
             return ownership.body;
           }
@@ -772,7 +781,7 @@ export function createApiApp(
             set.status = 403;
             return {
               error: `The '${input.tier}' tier requires a Pro or Enterprise account`,
-              code: "TIER_UPGRADE_REQUIRED",
+              code: 'TIER_UPGRADE_REQUIRED',
               details: { tier: input.tier },
             };
           }
@@ -781,15 +790,15 @@ export function createApiApp(
           // to a real user — otherwise rooms could be orphaned to phantom
           // ids no one can ever administer.
           let ownerId = access.room.ownerId;
-          if (ownerId === "anonymous") {
+          if (ownerId === 'anonymous') {
             ownerId = ownership.owner.id;
           } else if (input.ownerId && input.ownerId !== ownerId) {
             const target = await users.findById(input.ownerId);
             if (!target) {
               set.status = 400;
               return {
-                error: "Unknown user for owner transfer",
-                code: "INVALID_OWNER",
+                error: 'Unknown user for owner transfer',
+                code: 'INVALID_OWNER',
               };
             }
             ownerId = target.id;
@@ -801,19 +810,19 @@ export function createApiApp(
           );
           if (!updated) {
             set.status = 404;
-            return { error: "Room not found", code: "ROOM_NOT_FOUND" };
+            return { error: 'Room not found', code: 'ROOM_NOT_FOUND' };
           }
           return updated;
         },
       )
-      .post("/api/auth/register", async ({ body, set }) => {
+      .post('/api/auth/register', async ({ body, set }) => {
         const parsed = RegisterUserSchema.safeParse(body);
         if (!parsed.success) {
           set.status = 400;
-          if (parsed.error.issues.some((issue) => issue.path[0] === "password"))
+          if (parsed.error.issues.some((issue) => issue.path[0] === 'password'))
             return {
-              error: "Password must be at least 8 characters",
-              code: "INVALID_PASSWORD",
+              error: 'Password must be at least 8 characters',
+              code: 'INVALID_PASSWORD',
             };
           return validationError(parsed.error);
         }
@@ -825,7 +834,7 @@ export function createApiApp(
         });
         if (!user) {
           set.status = 409;
-          return { error: "Email is already registered", code: "USER_EXISTS" };
+          return { error: 'Email is already registered', code: 'USER_EXISTS' };
         }
         const { token, expiresIn } = issueUserToken(
           ticketSecret,
@@ -835,7 +844,7 @@ export function createApiApp(
         set.status = 201;
         return { user, token, expiresIn };
       })
-      .post("/api/auth/login", async ({ body, set }) => {
+      .post('/api/auth/login', async ({ body, set }) => {
         const parsed = LoginUserSchema.safeParse(body);
         if (!parsed.success) {
           set.status = 400;
@@ -849,8 +858,8 @@ export function createApiApp(
           // cannot be enumerated.
           set.status = 401;
           return {
-            error: "Invalid email or password",
-            code: "INVALID_CREDENTIALS",
+            error: 'Invalid email or password',
+            code: 'INVALID_CREDENTIALS',
           };
         }
         const { token, expiresIn } = issueUserToken(
@@ -860,7 +869,7 @@ export function createApiApp(
         );
         return { user, token, expiresIn };
       })
-      .get("/api/auth/me", async ({ headers, set }) => {
+      .get('/api/auth/me', async ({ headers, set }) => {
         const user = await requestUser(
           users,
           headers as Record<string, string | undefined>,
@@ -868,22 +877,22 @@ export function createApiApp(
         );
         if (!user) {
           set.status = 401;
-          return { error: "Invalid or expired token", code: "INVALID_TOKEN" };
+          return { error: 'Invalid or expired token', code: 'INVALID_TOKEN' };
         }
         return user;
       })
-      .get("/api/auth/sso/start", async ({ query, set }) => {
+      .get('/api/auth/sso/start', async ({ query, set }) => {
         const oidc = oidcConfig(config);
         if (!oidc) {
           set.status = 503;
           return {
-            error: "Single sign-on is not configured",
-            code: "SSO_NOT_CONFIGURED",
+            error: 'Single sign-on is not configured',
+            code: 'SSO_NOT_CONFIGURED',
           };
         }
         const params = query as Record<string, unknown>;
         const next = sanitizeNext(
-          typeof params.next === "string" ? params.next : null,
+          typeof params.next === 'string' ? params.next : null,
         );
         let discovery;
         try {
@@ -891,8 +900,8 @@ export function createApiApp(
         } catch {
           set.status = 502;
           return {
-            error: "Identity provider is unreachable",
-            code: "SSO_PROVIDER_ERROR",
+            error: 'Identity provider is unreachable',
+            code: 'SSO_PROVIDER_ERROR',
           };
         }
         const verifier = newCodeVerifier();
@@ -903,48 +912,45 @@ export function createApiApp(
           exp: Math.floor(Date.now() / 1000) + 600,
         });
         const authorize = new URL(discovery.authorization_endpoint);
-        authorize.searchParams.set("response_type", "code");
-        authorize.searchParams.set("client_id", oidc.clientId);
-        authorize.searchParams.set("redirect_uri", oidc.redirectUrl);
-        authorize.searchParams.set("scope", "openid email profile");
-        authorize.searchParams.set("state", sealed);
-        authorize.searchParams.set("code_challenge", pkceChallenge(verifier));
-        authorize.searchParams.set("code_challenge_method", "S256");
+        authorize.searchParams.set('response_type', 'code');
+        authorize.searchParams.set('client_id', oidc.clientId);
+        authorize.searchParams.set('redirect_uri', oidc.redirectUrl);
+        authorize.searchParams.set('scope', 'openid email profile');
+        authorize.searchParams.set('state', sealed);
+        authorize.searchParams.set('code_challenge', pkceChallenge(verifier));
+        authorize.searchParams.set('code_challenge_method', 'S256');
         // Login-CSRF defense: the sealed state must round-trip both as a
         // query param AND as an httpOnly cookie (checked on callback).
-        set.headers["set-cookie"] =
+        set.headers['set-cookie'] =
           `eunoia_oauth_state=${sealed}; Path=/api/auth/sso/callback; Max-Age=600; HttpOnly; SameSite=Lax` +
-          (config.nodeEnv === "production" ? "; Secure" : "");
+          (config.nodeEnv === 'production' ? '; Secure' : '');
         return { url: authorize.toString() };
       })
-      .get("/api/auth/sso/callback", async ({ query, headers, set }) => {
+      .get('/api/auth/sso/callback', async ({ query, headers, set }) => {
         const oidc = oidcConfig(config);
-        const frontendBase = (config.frontendBaseUrl ?? "").replace(/\/+$/, "");
+        const frontendBase = (config.frontendBaseUrl ?? '').replace(/\/+$/, '');
         const fail = (code: string) =>
-          Response.redirect(
-            `${frontendBase}/login?error=${code}`,
-            302,
-          );
+          Response.redirect(`${frontendBase}/login?error=${code}`, 302);
         if (!oidc || !frontendBase) {
           set.status = 503;
           return {
-            error: "Single sign-on is not configured",
-            code: "SSO_NOT_CONFIGURED",
+            error: 'Single sign-on is not configured',
+            code: 'SSO_NOT_CONFIGURED',
           };
         }
         const params = query as Record<string, unknown>;
-        const code = typeof params.code === "string" ? params.code : "";
-        const state = typeof params.state === "string" ? params.state : "";
+        const code = typeof params.code === 'string' ? params.code : '';
+        const state = typeof params.state === 'string' ? params.state : '';
         const cookieHeader = headers.cookie ?? headers.Cookie;
         const cookieState = parseCookies(
-          typeof cookieHeader === "string" ? cookieHeader : "",
-        )["eunoia_oauth_state"];
+          typeof cookieHeader === 'string' ? cookieHeader : '',
+        )['eunoia_oauth_state'];
         if (!code || !state || cookieState !== state) {
-          return fail("sso_state_mismatch");
+          return fail('sso_state_mismatch');
         }
         const opened = openState(ticketSecret, state);
         if (!opened) {
-          return fail("sso_state_expired");
+          return fail('sso_state_expired');
         }
         try {
           const discovery = await discoveryDocument(oidc.issuer);
@@ -968,41 +974,41 @@ export function createApiApp(
           );
           await recordAudit(deps.audit, {
             actorId: user.id,
-            action: "auth.sso.login",
+            action: 'auth.sso.login',
           });
           const clearCookie =
-            "eunoia_oauth_state=; Path=/api/auth/sso/callback; Max-Age=0; HttpOnly; SameSite=Lax";
-          set.headers["set-cookie"] = clearCookie;
+            'eunoia_oauth_state=; Path=/api/auth/sso/callback; Max-Age=0; HttpOnly; SameSite=Lax';
+          set.headers['set-cookie'] = clearCookie;
           return Response.redirect(
             `${frontendBase}/sso/callback?token=${session.token}&expiresIn=${session.expiresIn}&next=${encodeURIComponent(opened.next)}`,
             302,
           );
         } catch {
-          return fail("sso_failed");
+          return fail('sso_failed');
         }
       })
-      .post("/api/compile", async ({ body, headers, query, set }) => {
+      .post('/api/compile', async ({ body, headers, query, set }) => {
         const parsed = CompileRequestSchema.safeParse(body);
         if (!parsed.success) {
           set.status = 400;
           const engineIssue = parsed.error.issues.find(
-            (issue) => issue.path[0] === "engine",
+            (issue) => issue.path[0] === 'engine',
           );
           if (engineIssue) {
             const engine =
-              typeof body === "object" && body !== null
+              typeof body === 'object' && body !== null
                 ? (body as Record<string, unknown>).engine
                 : undefined;
             return {
               error: `Unknown layout engine: ${JSON.stringify(engine)}`,
-              code: "INVALID_ENGINE",
+              code: 'INVALID_ENGINE',
               details: { engine },
             };
           }
           return validationError(parsed.error);
         }
         const input = parsed.data;
-        const engine = input.engine ?? "dagre";
+        const engine = input.engine ?? 'dagre';
         // Tier is resolved server-side and never trusted from the client: the
         // higher of the room's stored tier and the caller's user tier wins,
         // defaulting to COMMUNITY. Locked rooms additionally require a ticket.
@@ -1011,7 +1017,7 @@ export function createApiApp(
           headers as Record<string, string | undefined>,
           ticketSecret,
         );
-        let tier: Tier = caller?.tier ?? "COMMUNITY";
+        let tier: Tier = caller?.tier ?? 'COMMUNITY';
         if (input.roomId) {
           const access = await requestRoomAccess(
             manager,
@@ -1021,32 +1027,35 @@ export function createApiApp(
             headers as Record<string, string | undefined>,
             query as Record<string, unknown>,
             ticketSecret,
-            "read",
+            'read',
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
           tier = higherTier(access.room.tier, tier);
         }
+        const started = Date.now();
         try {
           const result = await compileD2(
             { source: input.source, engine },
             {
               compilerUrl: config.d2CompilerUrl,
-              isDevelopment: config.nodeEnv !== "production",
+              isDevelopment: config.nodeEnv !== 'production',
               tier,
               nodeLimit: config.d2CommunityNodeLimit,
             },
           );
+          metrics.observeCompileDuration(engine, Date.now() - started);
           metrics.incCompile(
             engine,
-            "placeholder" in result && result.placeholder
-              ? "placeholder"
-              : "success",
+            'placeholder' in result && result.placeholder
+              ? 'placeholder'
+              : 'success',
           );
           return result;
         } catch (error) {
+          metrics.observeCompileDuration(engine, Date.now() - started);
           if (error instanceof CompileRequestError) {
             metrics.incCompile(engine, error.code);
             set.status = error.status;
@@ -1056,40 +1065,29 @@ export function createApiApp(
               details: error.details,
             };
           }
-          metrics.incCompile(engine, "error");
+          metrics.incCompile(engine, 'error');
           set.status = 502;
           return {
             error:
-              error instanceof Error ? error.message : "D2 compiler failed",
-            code: "D2_COMPILER_UNAVAILABLE",
+              error instanceof Error ? error.message : 'D2 compiler failed',
+            code: 'D2_COMPILER_UNAVAILABLE',
           };
         }
       })
-      .get("/api/ai/models", () => {
-        // Public (no auth): advertises picker choices + server default.
-        // Generation itself still requires auth + quota at POST.
-        const { models, default: defaultModel } = listAiModels(config);
-        return {
-          models,
-          default: defaultModel,
-          configured: config.aiApiKey !== undefined,
-          jevConfigured: isJevConfigured(config),
-        };
-      })
-      .post("/api/ai/generate", async ({ body, headers, query, set }) => {
+      .post('/api/ai/generate', async ({ body, headers, query, set }) => {
         if (!config.aiApiKey) {
           set.status = 503;
           return {
-            error: "AI generation is not configured",
-            code: "AI_NOT_CONFIGURED",
+            error: 'AI generation is not configured',
+            code: 'AI_NOT_CONFIGURED',
           };
         }
         const aiUsage = deps.aiUsage;
         if (!aiUsage) {
           set.status = 503;
           return {
-            error: "AI generation is not configured",
-            code: "AI_NOT_CONFIGURED",
+            error: 'AI generation is not configured',
+            code: 'AI_NOT_CONFIGURED',
           };
         }
         const parsed = GenerateDiagramSchema.safeParse(body);
@@ -1104,7 +1102,7 @@ export function createApiApp(
         );
         if (!caller) {
           set.status = 401;
-          return { error: "Authentication required", code: "AUTH_REQUIRED" };
+          return { error: 'Authentication required', code: 'AUTH_REQUIRED' };
         }
         // Tier travels like compile: the higher of room and caller tier,
         // which also selects the monthly quota below.
@@ -1118,9 +1116,9 @@ export function createApiApp(
             headers as Record<string, string | undefined>,
             query as Record<string, unknown>,
             ticketSecret,
-            "read",
+            'read',
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
@@ -1129,11 +1127,11 @@ export function createApiApp(
         const used = await aiUsage.getUsage(caller.id, currentMonth());
         const quota = AI_QUOTA[tier];
         if (used >= quota) {
-          metrics.incAi("quota_exhausted");
+          metrics.incAi('quota_exhausted');
           set.status = 429;
           return {
             error: `Monthly AI quota exhausted (${used}/${quota}). Upgrade for a higher budget.`,
-            code: "QUOTA_EXHAUSTED",
+            code: 'QUOTA_EXHAUSTED',
           };
         }
         // Jev pre-generation gate: block jailbreaks/spam before spending the
@@ -1234,19 +1232,19 @@ export function createApiApp(
             ...(jev ? { jev } : {}),
           };
         } catch (error) {
-          metrics.incAi("error");
+          metrics.incAi('error');
           const message =
-            error instanceof Error ? error.message : "AI generation failed";
-          const configured = message === "AI is not configured";
+            error instanceof Error ? error.message : 'AI generation failed';
+          const configured = message === 'AI is not configured';
           set.status = configured ? 503 : 502;
           return {
             error: message,
-            code: configured ? "AI_NOT_CONFIGURED" : "AI_PROVIDER_ERROR",
+            code: configured ? 'AI_NOT_CONFIGURED' : 'AI_PROVIDER_ERROR',
           };
         }
       })
       .post(
-        "/api/rooms/:roomId/images/request-upload",
+        '/api/rooms/:roomId/images/request-upload',
         async ({ params, body, headers, query, set }) => {
           const access = await requestAccess(
             manager,
@@ -1255,7 +1253,7 @@ export function createApiApp(
             query as Record<string, unknown>,
             ticketSecret,
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
@@ -1264,8 +1262,8 @@ export function createApiApp(
           if (!r2) {
             set.status = 503;
             return {
-              error: "Image storage is not configured",
-              code: "R2_NOT_CONFIGURED",
+              error: 'Image storage is not configured',
+              code: 'R2_NOT_CONFIGURED',
             };
           }
           const parsed = ImageRequestUploadSchema.safeParse(body);
@@ -1294,7 +1292,7 @@ export function createApiApp(
         },
       )
       .post(
-        "/api/rooms/:roomId/images/confirm",
+        '/api/rooms/:roomId/images/confirm',
         async ({ params, body, headers, query, set }) => {
           const access = await requestAccess(
             manager,
@@ -1303,7 +1301,7 @@ export function createApiApp(
             query as Record<string, unknown>,
             ticketSecret,
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
@@ -1312,8 +1310,8 @@ export function createApiApp(
           if (!r2) {
             set.status = 503;
             return {
-              error: "Image storage is not configured",
-              code: "R2_NOT_CONFIGURED",
+              error: 'Image storage is not configured',
+              code: 'R2_NOT_CONFIGURED',
             };
           }
           const parsed = ImageConfirmSchema.safeParse(body);
@@ -1325,8 +1323,8 @@ export function createApiApp(
           if (!keyBelongsToRoom(input.key, room.id)) {
             set.status = 400;
             return {
-              error: "Key does not belong to this room",
-              code: "INVALID_KEY",
+              error: 'Key does not belong to this room',
+              code: 'INVALID_KEY',
             };
           }
           let head: ObjectHead | null;
@@ -1337,7 +1335,7 @@ export function createApiApp(
           }
           if (!head) {
             set.status = 404;
-            return { error: "Upload not found", code: "OBJECT_NOT_FOUND" };
+            return { error: 'Upload not found', code: 'OBJECT_NOT_FOUND' };
           }
           const contentType = ImageContentTypeSchema.safeParse(
             head.contentType ?? input.contentType,
@@ -1345,32 +1343,32 @@ export function createApiApp(
           if (!contentType.success) {
             set.status = 400;
             return {
-              error: "Unsupported content type",
-              code: "INVALID_CONTENT_TYPE",
+              error: 'Unsupported content type',
+              code: 'INVALID_CONTENT_TYPE',
             };
           }
           const size = head.size ?? input.size;
           if (
-            typeof size !== "number" ||
+            typeof size !== 'number' ||
             !Number.isInteger(size) ||
             size <= 0
           ) {
             set.status = 400;
-            return { error: "Size is required", code: "INVALID_SIZE" };
+            return { error: 'Size is required', code: 'INVALID_SIZE' };
           }
           if (size > config.r2MaxUploadBytes) {
             await r2.delete(input.key).catch(() => undefined);
             set.status = 413;
             return {
               error: `Upload exceeds the ${config.r2MaxUploadBytes} byte limit`,
-              code: "UPLOAD_TOO_LARGE",
+              code: 'UPLOAD_TOO_LARGE',
             };
           }
           if (await images.imageStore.findByKey(input.key)) {
             set.status = 409;
             return {
-              error: "Image already confirmed",
-              code: "IMAGE_ALREADY_CONFIRMED",
+              error: 'Image already confirmed',
+              code: 'IMAGE_ALREADY_CONFIRMED',
             };
           }
           try {
@@ -1392,11 +1390,11 @@ export function createApiApp(
               kind: input.kind,
             });
           } catch (error) {
-            if ((error as { code?: string }).code === "P2002") {
+            if ((error as { code?: string }).code === 'P2002') {
               set.status = 409;
               return {
-                error: "Image already confirmed",
-                code: "IMAGE_ALREADY_CONFIRMED",
+                error: 'Image already confirmed',
+                code: 'IMAGE_ALREADY_CONFIRMED',
               };
             }
             return r2Error(set, error);
@@ -1404,7 +1402,7 @@ export function createApiApp(
         },
       )
       .get(
-        "/api/rooms/:roomId/images",
+        '/api/rooms/:roomId/images',
         async ({ params, headers, query, set }) => {
           const access = await requestAccess(
             manager,
@@ -1413,7 +1411,7 @@ export function createApiApp(
             query as Record<string, unknown>,
             ticketSecret,
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
@@ -1459,7 +1457,7 @@ export function createApiApp(
         },
       )
       .get(
-        "/api/rooms/:roomId/images/:imageId/url",
+        '/api/rooms/:roomId/images/:imageId/url',
         async ({ params, headers, query, set }) => {
           const access = await requestAccess(
             manager,
@@ -1468,21 +1466,21 @@ export function createApiApp(
             query as Record<string, unknown>,
             ticketSecret,
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
           const image = await images.imageStore.getImage(params.imageId);
           if (!image || image.roomId !== params.roomId) {
             set.status = 404;
-            return { error: "Image not found", code: "IMAGE_NOT_FOUND" };
+            return { error: 'Image not found', code: 'IMAGE_NOT_FOUND' };
           }
           const r2 = images.r2;
           if (!r2) {
             set.status = 503;
             return {
-              error: "Image storage is not configured",
-              code: "R2_NOT_CONFIGURED",
+              error: 'Image storage is not configured',
+              code: 'R2_NOT_CONFIGURED',
             };
           }
           try {
@@ -1498,7 +1496,7 @@ export function createApiApp(
         },
       )
       .delete(
-        "/api/rooms/:roomId/images/:imageId",
+        '/api/rooms/:roomId/images/:imageId',
         async ({ params, headers, query, set }) => {
           const access = await requestAccess(
             manager,
@@ -1507,21 +1505,21 @@ export function createApiApp(
             query as Record<string, unknown>,
             ticketSecret,
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
           const image = await images.imageStore.getImage(params.imageId);
           if (!image || image.roomId !== params.roomId) {
             set.status = 404;
-            return { error: "Image not found", code: "IMAGE_NOT_FOUND" };
+            return { error: 'Image not found', code: 'IMAGE_NOT_FOUND' };
           }
           const r2 = images.r2;
           if (!r2) {
             set.status = 503;
             return {
-              error: "Image storage is not configured",
-              code: "R2_NOT_CONFIGURED",
+              error: 'Image storage is not configured',
+              code: 'R2_NOT_CONFIGURED',
             };
           }
           try {
@@ -1537,7 +1535,7 @@ export function createApiApp(
         },
       )
       .get(
-        "/api/rooms/:roomId/images/:imageId/bytes",
+        '/api/rooms/:roomId/images/:imageId/bytes',
         async ({ params, headers, query, set }) => {
           const access = await requestAccess(
             manager,
@@ -1546,44 +1544,49 @@ export function createApiApp(
             query as Record<string, unknown>,
             ticketSecret,
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
           const image = await images.imageStore.getImage(params.imageId);
           if (!image || image.roomId !== params.roomId) {
             set.status = 404;
-            return { error: "Image not found", code: "IMAGE_NOT_FOUND" };
+            return { error: 'Image not found', code: 'IMAGE_NOT_FOUND' };
           }
           if (!keyBelongsToRoom(image.key, params.roomId)) {
             set.status = 400;
-            return { error: "Key does not belong to this room", code: "INVALID_KEY" };
+            return {
+              error: 'Key does not belong to this room',
+              code: 'INVALID_KEY',
+            };
           }
           const r2 = images.r2;
           if (!r2) {
             set.status = 503;
             return {
-              error: "Image storage is not configured",
-              code: "R2_NOT_CONFIGURED",
+              error: 'Image storage is not configured',
+              code: 'R2_NOT_CONFIGURED',
             };
           }
           try {
             const object = await r2.getObject(image.key);
             if (!object) {
               set.status = 404;
-              return { error: "Object not found", code: "OBJECT_NOT_FOUND" };
+              return { error: 'Object not found', code: 'OBJECT_NOT_FOUND' };
             }
             const contentType =
-              object.contentType || image.contentType || "application/octet-stream";
+              object.contentType ||
+              image.contentType ||
+              'application/octet-stream';
             // Same-origin bytes for export rasterization: browsers can fetch
             // without CORS taint, and expired presigned URLs never surface.
             return new Response(object.body, {
               status: 200,
               headers: {
-                "content-type": contentType,
-                "content-length": String(object.body.byteLength),
-                "cache-control": "private, max-age=300",
-                "access-control-allow-origin": "*",
+                'content-type': contentType,
+                'content-length': String(object.body.byteLength),
+                'cache-control': 'private, max-age=300',
+                'access-control-allow-origin': '*',
               },
             });
           } catch (error) {
@@ -1592,7 +1595,7 @@ export function createApiApp(
         },
       )
       .get(
-        "/api/rooms/:roomId/snapshots",
+        '/api/rooms/:roomId/snapshots',
         async ({ params, headers, query, set }) => {
           const access = await requestAccess(
             manager,
@@ -1601,7 +1604,7 @@ export function createApiApp(
             query as Record<string, unknown>,
             ticketSecret,
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
@@ -1629,7 +1632,7 @@ export function createApiApp(
         },
       )
       .post(
-        "/api/rooms/:roomId/snapshots/:snapshotId/restore",
+        '/api/rooms/:roomId/snapshots/:snapshotId/restore',
         async ({ params, headers, query, set }) => {
           const access = await requestAccess(
             manager,
@@ -1638,7 +1641,7 @@ export function createApiApp(
             query as Record<string, unknown>,
             ticketSecret,
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
@@ -1657,7 +1660,7 @@ export function createApiApp(
             await recordAudit(deps.audit, {
               actorId: restorer?.id ?? null,
               workspaceId: access.room.workspaceId,
-              action: "snapshot.restore",
+              action: 'snapshot.restore',
               target: params.snapshotId,
             });
             return {
@@ -1666,16 +1669,16 @@ export function createApiApp(
             };
           }
           set.status = 404;
-          return { error: "Snapshot not found", code: "SNAPSHOT_NOT_FOUND" };
+          return { error: 'Snapshot not found', code: 'SNAPSHOT_NOT_FOUND' };
         },
       )
-      .post("/api/workspaces", async ({ body, headers, set }) => {
+      .post('/api/workspaces', async ({ body, headers, set }) => {
         const workspaces = deps.workspaces;
         if (!workspaces) {
           set.status = 503;
           return {
-            error: "Workspaces are not configured",
-            code: "WORKSPACES_NOT_CONFIGURED",
+            error: 'Workspaces are not configured',
+            code: 'WORKSPACES_NOT_CONFIGURED',
           };
         }
         const parsed = CreateWorkspaceSchema.safeParse(body);
@@ -1690,7 +1693,7 @@ export function createApiApp(
         );
         if (!user) {
           set.status = 401;
-          return { error: "Authentication required", code: "AUTH_REQUIRED" };
+          return { error: 'Authentication required', code: 'AUTH_REQUIRED' };
         }
         if (
           parsed.data.tier &&
@@ -1699,7 +1702,7 @@ export function createApiApp(
           set.status = 403;
           return {
             error: `The '${parsed.data.tier}' tier requires a Pro or Enterprise account`,
-            code: "TIER_UPGRADE_REQUIRED",
+            code: 'TIER_UPGRADE_REQUIRED',
             details: { tier: parsed.data.tier },
           };
         }
@@ -1709,15 +1712,15 @@ export function createApiApp(
           tier: parsed.data.tier ?? user.tier,
         });
         set.status = 201;
-        return { workspace, role: "ADMIN" as const };
+        return { workspace, role: 'ADMIN' as const };
       })
-      .get("/api/workspaces", async ({ headers, set }) => {
+      .get('/api/workspaces', async ({ headers, set }) => {
         const workspaces = deps.workspaces;
         if (!workspaces) {
           set.status = 503;
           return {
-            error: "Workspaces are not configured",
-            code: "WORKSPACES_NOT_CONFIGURED",
+            error: 'Workspaces are not configured',
+            code: 'WORKSPACES_NOT_CONFIGURED',
           };
         }
         const user = await requestUser(
@@ -1727,64 +1730,61 @@ export function createApiApp(
         );
         if (!user) {
           set.status = 401;
-          return { error: "Authentication required", code: "AUTH_REQUIRED" };
+          return { error: 'Authentication required', code: 'AUTH_REQUIRED' };
         }
         return {
           workspaces: await workspaces.listWorkspacesForUser(user.id),
         };
       })
-      .get(
-        "/api/workspaces/:workspaceId",
-        async ({ params, headers, set }) => {
-          const workspaces = deps.workspaces;
-          if (!workspaces) {
-            set.status = 503;
-            return {
-              error: "Workspaces are not configured",
-              code: "WORKSPACES_NOT_CONFIGURED",
-            };
-          }
-          const access = await requireWorkspaceRole(
-            workspaces,
-            users,
-            params.workspaceId,
-            headers as Record<string, string | undefined>,
-            ticketSecret,
-            "VIEWER",
-          );
-          if ("body" in access) {
-            set.status = access.status;
-            return access.body;
-          }
-          const workspace = await workspaces.getWorkspace(params.workspaceId);
-          const folders = await workspaces.listFolders(params.workspaceId);
-          const rooms = await manager.listRooms({
-            workspaceId: params.workspaceId,
-          });
+      .get('/api/workspaces/:workspaceId', async ({ params, headers, set }) => {
+        const workspaces = deps.workspaces;
+        if (!workspaces) {
+          set.status = 503;
           return {
-            workspace,
-            role: access.role,
-            folders,
-            rooms: rooms.map((room) => ({
-              id: room.id,
-              name: room.name,
-              ownerId: room.ownerId,
-              tier: room.tier,
-              folderId: room.folderId,
-              hasPassword: room.hasPassword,
-            })),
+            error: 'Workspaces are not configured',
+            code: 'WORKSPACES_NOT_CONFIGURED',
           };
-        },
-      )
+        }
+        const access = await requireWorkspaceRole(
+          workspaces,
+          users,
+          params.workspaceId,
+          headers as Record<string, string | undefined>,
+          ticketSecret,
+          'VIEWER',
+        );
+        if ('body' in access) {
+          set.status = access.status;
+          return access.body;
+        }
+        const workspace = await workspaces.getWorkspace(params.workspaceId);
+        const folders = await workspaces.listFolders(params.workspaceId);
+        const rooms = await manager.listRooms({
+          workspaceId: params.workspaceId,
+        });
+        return {
+          workspace,
+          role: access.role,
+          folders,
+          rooms: rooms.map((room) => ({
+            id: room.id,
+            name: room.name,
+            ownerId: room.ownerId,
+            tier: room.tier,
+            folderId: room.folderId,
+            hasPassword: room.hasPassword,
+          })),
+        };
+      })
       .delete(
-        "/api/workspaces/:workspaceId",
+        '/api/workspaces/:workspaceId',
         async ({ params, headers, set }) => {
           const workspaces = deps.workspaces;
           if (!workspaces) {
             set.status = 503;
             return {
-              error: "Workspaces are not configured",
-              code: "WORKSPACES_NOT_CONFIGURED",
+              error: 'Workspaces are not configured',
+              code: 'WORKSPACES_NOT_CONFIGURED',
             };
           }
           const user = await requestUser(
@@ -1794,14 +1794,14 @@ export function createApiApp(
           );
           if (!user) {
             set.status = 401;
-            return { error: "Authentication required", code: "AUTH_REQUIRED" };
+            return { error: 'Authentication required', code: 'AUTH_REQUIRED' };
           }
           const workspace = await workspaces.getWorkspace(params.workspaceId);
           if (!workspace) {
             set.status = 404;
             return {
-              error: "Workspace not found",
-              code: "WORKSPACE_NOT_FOUND",
+              error: 'Workspace not found',
+              code: 'WORKSPACE_NOT_FOUND',
             };
           }
           // Deletion is owner-only: ADMIN members manage people and rooms,
@@ -1810,29 +1810,29 @@ export function createApiApp(
           if (workspace.ownerId !== user.id) {
             set.status = 403;
             return {
-              error: "Only the workspace owner may delete it",
-              code: "FORBIDDEN",
+              error: 'Only the workspace owner may delete it',
+              code: 'FORBIDDEN',
             };
           }
           await workspaces.deleteWorkspace(params.workspaceId);
           await recordAudit(deps.audit, {
             actorId: user.id,
             workspaceId: params.workspaceId,
-            action: "workspace.delete",
+            action: 'workspace.delete',
           });
           set.status = 204;
           return;
         },
       )
       .post(
-        "/api/workspaces/:workspaceId/folders",
+        '/api/workspaces/:workspaceId/folders',
         async ({ params, body, headers, set }) => {
           const workspaces = deps.workspaces;
           if (!workspaces) {
             set.status = 503;
             return {
-              error: "Workspaces are not configured",
-              code: "WORKSPACES_NOT_CONFIGURED",
+              error: 'Workspaces are not configured',
+              code: 'WORKSPACES_NOT_CONFIGURED',
             };
           }
           const parsed = CreateFolderSchema.safeParse(body);
@@ -1846,9 +1846,9 @@ export function createApiApp(
             params.workspaceId,
             headers as Record<string, string | undefined>,
             ticketSecret,
-            "EDITOR",
+            'EDITOR',
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
@@ -1861,14 +1861,14 @@ export function createApiApp(
         },
       )
       .post(
-        "/api/workspaces/:workspaceId/members",
+        '/api/workspaces/:workspaceId/members',
         async ({ params, body, headers, set }) => {
           const workspaces = deps.workspaces;
           if (!workspaces) {
             set.status = 503;
             return {
-              error: "Workspaces are not configured",
-              code: "WORKSPACES_NOT_CONFIGURED",
+              error: 'Workspaces are not configured',
+              code: 'WORKSPACES_NOT_CONFIGURED',
             };
           }
           const parsed = InviteMemberSchema.safeParse(body);
@@ -1882,9 +1882,9 @@ export function createApiApp(
             params.workspaceId,
             headers as Record<string, string | undefined>,
             ticketSecret,
-            "ADMIN",
+            'ADMIN',
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
@@ -1894,8 +1894,8 @@ export function createApiApp(
           if (!invitee) {
             set.status = 404;
             return {
-              error: "Invited user not found",
-              code: "USER_NOT_FOUND",
+              error: 'Invited user not found',
+              code: 'USER_NOT_FOUND',
             };
           }
           const workspace = await workspaces.getWorkspace(params.workspaceId);
@@ -1905,19 +1905,18 @@ export function createApiApp(
           const limit = await workspaceSeatLimit(
             deps.billing,
             users,
-            workspace?.ownerId ?? "",
+            workspace?.ownerId ?? '',
           );
           const alreadyMember = await workspaces.getMembership(
             params.workspaceId,
             invitee.id,
           );
-          const used =
-            1 + (await workspaces.countMembers(params.workspaceId));
+          const used = 1 + (await workspaces.countMembers(params.workspaceId));
           if (!alreadyMember && used >= limit) {
             set.status = 403;
             return {
               error: `Seat limit reached (${used}/${limit}). Upgrade the workspace owner's subscription to invite more members.`,
-              code: "SEATS_EXHAUSTED",
+              code: 'SEATS_EXHAUSTED',
             };
           }
           const membership = await workspaces.upsertMembership({
@@ -1933,7 +1932,7 @@ export function createApiApp(
           await recordAudit(deps.audit, {
             actorId: inviter?.id ?? null,
             workspaceId: params.workspaceId,
-            action: "workspace.member.invite",
+            action: 'workspace.member.invite',
             target: invitee.id,
           });
           set.status = 201;
@@ -1941,14 +1940,14 @@ export function createApiApp(
         },
       )
       .get(
-        "/api/workspaces/:workspaceId/members",
+        '/api/workspaces/:workspaceId/members',
         async ({ params, headers, set }) => {
           const workspaces = deps.workspaces;
           if (!workspaces) {
             set.status = 503;
             return {
-              error: "Workspaces are not configured",
-              code: "WORKSPACES_NOT_CONFIGURED",
+              error: 'Workspaces are not configured',
+              code: 'WORKSPACES_NOT_CONFIGURED',
             };
           }
           const access = await requireWorkspaceRole(
@@ -1957,9 +1956,9 @@ export function createApiApp(
             params.workspaceId,
             headers as Record<string, string | undefined>,
             ticketSecret,
-            "VIEWER",
+            'VIEWER',
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
@@ -1972,26 +1971,26 @@ export function createApiApp(
                     {
                       workspaceId: params.workspaceId,
                       userId: workspace.ownerId,
-                      role: "ADMIN" as const,
+                      role: 'ADMIN' as const,
                     },
                   ]
                 : []),
-              ...((await workspaces.listMembers(params.workspaceId)).filter(
+              ...(await workspaces.listMembers(params.workspaceId)).filter(
                 (member) => member.userId !== workspace?.ownerId,
-              )),
+              ),
             ],
           };
         },
       )
       .patch(
-        "/api/workspaces/:workspaceId/members/:userId",
+        '/api/workspaces/:workspaceId/members/:userId',
         async ({ params, body, headers, set }) => {
           const workspaces = deps.workspaces;
           if (!workspaces) {
             set.status = 503;
             return {
-              error: "Workspaces are not configured",
-              code: "WORKSPACES_NOT_CONFIGURED",
+              error: 'Workspaces are not configured',
+              code: 'WORKSPACES_NOT_CONFIGURED',
             };
           }
           const parsed = UpdateMemberSchema.safeParse(body);
@@ -2005,9 +2004,9 @@ export function createApiApp(
             params.workspaceId,
             headers as Record<string, string | undefined>,
             ticketSecret,
-            "ADMIN",
+            'ADMIN',
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
@@ -2018,8 +2017,8 @@ export function createApiApp(
           if (!existing) {
             set.status = 404;
             return {
-              error: "Membership not found",
-              code: "MEMBERSHIP_NOT_FOUND",
+              error: 'Membership not found',
+              code: 'MEMBERSHIP_NOT_FOUND',
             };
           }
           const updatedMembership = await workspaces.upsertMembership({
@@ -2035,21 +2034,21 @@ export function createApiApp(
           await recordAudit(deps.audit, {
             actorId: roleEditor?.id ?? null,
             workspaceId: params.workspaceId,
-            action: "workspace.member.update",
+            action: 'workspace.member.update',
             target: params.userId,
           });
           return { membership: updatedMembership };
         },
       )
       .delete(
-        "/api/workspaces/:workspaceId/members/:userId",
+        '/api/workspaces/:workspaceId/members/:userId',
         async ({ params, headers, set }) => {
           const workspaces = deps.workspaces;
           if (!workspaces) {
             set.status = 503;
             return {
-              error: "Workspaces are not configured",
-              code: "WORKSPACES_NOT_CONFIGURED",
+              error: 'Workspaces are not configured',
+              code: 'WORKSPACES_NOT_CONFIGURED',
             };
           }
           const user = await requestUser(
@@ -2059,14 +2058,14 @@ export function createApiApp(
           );
           if (!user) {
             set.status = 401;
-            return { error: "Authentication required", code: "AUTH_REQUIRED" };
+            return { error: 'Authentication required', code: 'AUTH_REQUIRED' };
           }
           const workspace = await workspaces.getWorkspace(params.workspaceId);
           if (!workspace) {
             set.status = 404;
             return {
-              error: "Workspace not found",
-              code: "WORKSPACE_NOT_FOUND",
+              error: 'Workspace not found',
+              code: 'WORKSPACE_NOT_FOUND',
             };
           }
           // Members may leave themselves; removing anyone else needs ADMIN.
@@ -2080,9 +2079,9 @@ export function createApiApp(
               params.workspaceId,
               headers as Record<string, string | undefined>,
               ticketSecret,
-              "ADMIN",
+              'ADMIN',
             );
-            if ("body" in access) {
+            if ('body' in access) {
               set.status = access.status;
               return access.body;
             }
@@ -2090,25 +2089,22 @@ export function createApiApp(
           if (params.userId === workspace.ownerId) {
             set.status = 400;
             return {
-              error: "The workspace owner cannot be removed",
-              code: "CANNOT_REMOVE_OWNER",
+              error: 'The workspace owner cannot be removed',
+              code: 'CANNOT_REMOVE_OWNER',
             };
           }
-          await workspaces.removeMembership(
-            params.workspaceId,
-            params.userId,
-          );
+          await workspaces.removeMembership(params.workspaceId, params.userId);
           await recordAudit(deps.audit, {
             actorId: user.id,
             workspaceId: params.workspaceId,
-            action: "workspace.member.remove",
+            action: 'workspace.member.remove',
             target: params.userId,
           });
           set.status = 204;
           return;
         },
       )
-      .get("/api/rooms", async ({ headers, query, set }) => {
+      .get('/api/rooms', async ({ headers, query, set }) => {
         const access = await (async () => {
           const user = await requestUser(
             users,
@@ -2119,13 +2115,13 @@ export function createApiApp(
             return {
               status: 401 as const,
               body: {
-                error: "Authentication required",
-                code: "AUTH_REQUIRED",
+                error: 'Authentication required',
+                code: 'AUTH_REQUIRED',
               },
             };
           return { user };
         })();
-        if ("body" in access) {
+        if ('body' in access) {
           set.status = access.status;
           return access.body;
         }
@@ -2146,14 +2142,14 @@ export function createApiApp(
             parsed.data.workspaceId,
             headers as Record<string, string | undefined>,
             ticketSecret,
-            "VIEWER",
+            'VIEWER',
           );
-          if ("body" in roleAccess) {
+          if ('body' in roleAccess) {
             if (!deps.workspaces) {
               set.status = 503;
               return {
-                error: "Workspaces are not configured",
-                code: "WORKSPACES_NOT_CONFIGURED",
+                error: 'Workspaces are not configured',
+                code: 'WORKSPACES_NOT_CONFIGURED',
               };
             }
             set.status = roleAccess.status;
@@ -2173,14 +2169,14 @@ export function createApiApp(
         };
       })
       .post(
-        "/api/rooms/:roomId/move",
+        '/api/rooms/:roomId/move',
         async ({ params, body, headers, query, set }) => {
           const workspaces = deps.workspaces;
           if (!workspaces) {
             set.status = 503;
             return {
-              error: "Workspaces are not configured",
-              code: "WORKSPACES_NOT_CONFIGURED",
+              error: 'Workspaces are not configured',
+              code: 'WORKSPACES_NOT_CONFIGURED',
             };
           }
           // Ticket first, then identity: owners/admins act on locked
@@ -2194,10 +2190,10 @@ export function createApiApp(
             headers as Record<string, string | undefined>,
             query as Record<string, unknown>,
             ticketSecret,
-            "write",
+            'write',
           );
           let room: RoomMetadata;
-          if ("body" in access) {
+          if ('body' in access) {
             if (access.status !== 401) {
               set.status = access.status;
               return access.body;
@@ -2205,7 +2201,7 @@ export function createApiApp(
             const meta = await manager.getRoomMetadata(params.roomId);
             if (!meta) {
               set.status = 404;
-              return { error: "Room not found", code: "ROOM_NOT_FOUND" };
+              return { error: 'Room not found', code: 'ROOM_NOT_FOUND' };
             }
             const mutation = await requireRoomMutation(
               workspaces,
@@ -2214,7 +2210,7 @@ export function createApiApp(
               headers as Record<string, string | undefined>,
               ticketSecret,
             );
-            if ("body" in mutation) {
+            if ('body' in mutation) {
               set.status = mutation.status;
               return mutation.body;
             }
@@ -2243,7 +2239,7 @@ export function createApiApp(
               headers as Record<string, string | undefined>,
               ticketSecret,
             );
-            if ("body" in mutation) {
+            if ('body' in mutation) {
               set.status = mutation.status;
               return mutation.body;
             }
@@ -2251,8 +2247,8 @@ export function createApiApp(
             if (!user) {
               set.status = 401;
               return {
-                error: "Authentication required",
-                code: "AUTH_REQUIRED",
+                error: 'Authentication required',
+                code: 'AUTH_REQUIRED',
               };
             }
             const target = await requireWorkspaceRole(
@@ -2261,9 +2257,9 @@ export function createApiApp(
               parsed.data.workspaceId,
               headers as Record<string, string | undefined>,
               ticketSecret,
-              "EDITOR",
+              'EDITOR',
             );
-            if ("body" in target) {
+            if ('body' in target) {
               set.status = target.status;
               return target.body;
             }
@@ -2274,12 +2270,11 @@ export function createApiApp(
                 room.workspaceId,
                 headers as Record<string, string | undefined>,
                 ticketSecret,
-                "ADMIN",
+                'ADMIN',
               );
               const ownsRoom =
-                room.ownerId !== "anonymous" &&
-                room.ownerId === user.id;
-              if ("body" in source && !ownsRoom) {
+                room.ownerId !== 'anonymous' && room.ownerId === user.id;
+              if ('body' in source && !ownsRoom) {
                 set.status = source.status;
                 return source.body;
               }
@@ -2291,21 +2286,23 @@ export function createApiApp(
                 headers as Record<string, string | undefined>,
                 ticketSecret,
               );
-              if ("body" in mutation) {
+              if ('body' in mutation) {
                 set.status = mutation.status;
                 return mutation.body;
               }
             }
           }
-          if (parsed.data.folderId !== undefined && parsed.data.folderId !== null) {
+          if (
+            parsed.data.folderId !== undefined &&
+            parsed.data.folderId !== null
+          ) {
             const folder = await workspaces.getFolder(parsed.data.folderId);
-            const targetWs =
-              parsed.data.workspaceId ?? room.workspaceId;
+            const targetWs = parsed.data.workspaceId ?? room.workspaceId;
             if (!folder || folder.workspaceId !== targetWs) {
               set.status = 400;
               return {
-                error: "Folder does not belong to the target workspace",
-                code: "INVALID_FOLDER",
+                error: 'Folder does not belong to the target workspace',
+                code: 'INVALID_FOLDER',
               };
             }
           }
@@ -2320,29 +2317,29 @@ export function createApiApp(
           });
           if (!updated) {
             set.status = 404;
-            return { error: "Room not found", code: "ROOM_NOT_FOUND" };
+            return { error: 'Room not found', code: 'ROOM_NOT_FOUND' };
           }
           return updated;
         },
       )
-      .get("/api/billing/prices", async ({ set }) => {
+      .get('/api/billing/prices', async ({ set }) => {
         const billing = deps.billing;
         if (!billing) {
           set.status = 503;
           return {
-            error: "Billing is not configured",
-            code: "BILLING_NOT_CONFIGURED",
+            error: 'Billing is not configured',
+            code: 'BILLING_NOT_CONFIGURED',
           };
         }
         return { prices: billing.provider.plans() };
       })
-      .post("/api/billing/checkout", async ({ body, headers, set }) => {
+      .post('/api/billing/checkout', async ({ body, headers, set }) => {
         const billing = deps.billing;
         if (!billing) {
           set.status = 503;
           return {
-            error: "Billing is not configured",
-            code: "BILLING_NOT_CONFIGURED",
+            error: 'Billing is not configured',
+            code: 'BILLING_NOT_CONFIGURED',
           };
         }
         const user = await requestUser(
@@ -2352,7 +2349,7 @@ export function createApiApp(
         );
         if (!user) {
           set.status = 401;
-          return { error: "Authentication required", code: "AUTH_REQUIRED" };
+          return { error: 'Authentication required', code: 'AUTH_REQUIRED' };
         }
         const parsed = CheckoutSchema.safeParse(body);
         if (!parsed.success) {
@@ -2368,7 +2365,7 @@ export function createApiApp(
           set.status = 400;
           return {
             error: `Unknown price: ${parsed.data.priceKey}`,
-            code: "INVALID_PRICE",
+            code: 'INVALID_PRICE',
           };
         }
         try {
@@ -2382,12 +2379,12 @@ export function createApiApp(
         } catch (error) {
           set.status = 500;
           return {
-            error: error instanceof Error ? error.message : "Checkout failed",
-            code: "CHECKOUT_FAILED",
+            error: error instanceof Error ? error.message : 'Checkout failed',
+            code: 'CHECKOUT_FAILED',
           };
         }
       })
-      .post("/api/billing/cancel", async ({ headers, set }) => {
+      .post('/api/billing/cancel', async ({ headers, set }) => {
         // Razorpay has no customer portal: cancellation is a server-side
         // call (at cycle end, so paid access runs out naturally). The
         // webhook downgrades the tier when the subscription ends.
@@ -2395,8 +2392,8 @@ export function createApiApp(
         if (!billing) {
           set.status = 503;
           return {
-            error: "Billing is not configured",
-            code: "BILLING_NOT_CONFIGURED",
+            error: 'Billing is not configured',
+            code: 'BILLING_NOT_CONFIGURED',
           };
         }
         const user = await requestUser(
@@ -2406,14 +2403,14 @@ export function createApiApp(
         );
         if (!user) {
           set.status = 401;
-          return { error: "Authentication required", code: "AUTH_REQUIRED" };
+          return { error: 'Authentication required', code: 'AUTH_REQUIRED' };
         }
         const sub = await billing.subscriptionStore.findByUserId(user.id);
         if (!sub?.providerSubId) {
           set.status = 400;
           return {
-            error: "No active billing subscription",
-            code: "NO_SUBSCRIPTION",
+            error: 'No active billing subscription',
+            code: 'NO_SUBSCRIPTION',
           };
         }
         try {
@@ -2424,19 +2421,18 @@ export function createApiApp(
         } catch (error) {
           set.status = 500;
           return {
-            error:
-              error instanceof Error ? error.message : "Cancel failed",
-            code: "CANCEL_FAILED",
+            error: error instanceof Error ? error.message : 'Cancel failed',
+            code: 'CANCEL_FAILED',
           };
         }
       })
-      .get("/api/billing/subscription", async ({ headers, set }) => {
+      .get('/api/billing/subscription', async ({ headers, set }) => {
         const billing = deps.billing;
         if (!billing) {
           set.status = 503;
           return {
-            error: "Billing is not configured",
-            code: "BILLING_NOT_CONFIGURED",
+            error: 'Billing is not configured',
+            code: 'BILLING_NOT_CONFIGURED',
           };
         }
         const user = await requestUser(
@@ -2446,12 +2442,14 @@ export function createApiApp(
         );
         if (!user) {
           set.status = 401;
-          return { error: "Authentication required", code: "AUTH_REQUIRED" };
+          return { error: 'Authentication required', code: 'AUTH_REQUIRED' };
         }
-        const subscription = await billing.subscriptionStore.findByUserId(user.id);
+        const subscription = await billing.subscriptionStore.findByUserId(
+          user.id,
+        );
         return { subscription: subscription ?? null, userTier: user.tier };
       })
-      .get("/api/audit", async ({ headers, query, set }) => {
+      .get('/api/audit', async ({ headers, query, set }) => {
         const user = await requestUser(
           users,
           headers as Record<string, string | undefined>,
@@ -2459,16 +2457,16 @@ export function createApiApp(
         );
         if (!user) {
           set.status = 401;
-          return { error: "Authentication required", code: "AUTH_REQUIRED" };
+          return { error: 'Authentication required', code: 'AUTH_REQUIRED' };
         }
         const params = query as Record<string, unknown>;
         const workspaceId =
-          typeof params.workspaceId === "string" && params.workspaceId
+          typeof params.workspaceId === 'string' && params.workspaceId
             ? params.workspaceId
             : undefined;
-        const mineOnly = params.mine === "1" || params.mine === "true";
+        const mineOnly = params.mine === '1' || params.mine === 'true';
         const limit =
-          typeof params.limit === "string" && params.limit
+          typeof params.limit === 'string' && params.limit
             ? Number.parseInt(params.limit, 10)
             : undefined;
         // Workspace audit requires ADMIN; without a workspace scope,
@@ -2477,8 +2475,8 @@ export function createApiApp(
           if (!deps.workspaces) {
             set.status = 503;
             return {
-              error: "Workspaces are not configured",
-              code: "WORKSPACES_NOT_CONFIGURED",
+              error: 'Workspaces are not configured',
+              code: 'WORKSPACES_NOT_CONFIGURED',
             };
           }
           const access = await requireWorkspaceRole(
@@ -2487,9 +2485,9 @@ export function createApiApp(
             workspaceId,
             headers as Record<string, string | undefined>,
             ticketSecret,
-            "ADMIN",
+            'ADMIN',
           );
-          if ("body" in access) {
+          if ('body' in access) {
             set.status = access.status;
             return access.body;
           }
@@ -2500,8 +2498,8 @@ export function createApiApp(
         if (!mineOnly) {
           set.status = 400;
           return {
-            error: "Pass workspaceId (ADMIN) or mine=1",
-            code: "VALIDATION_ERROR",
+            error: 'Pass workspaceId (ADMIN) or mine=1',
+            code: 'VALIDATION_ERROR',
           };
         }
         return {

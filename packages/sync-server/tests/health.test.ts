@@ -91,6 +91,26 @@ describe('health, readiness, and metrics', () => {
     expect(text).toContain(
       'eunoia_compile_requests_total{engine="dagre",outcome="placeholder"} 1',
     );
+    expect(text).toContain(
+      'eunoia_compile_duration_ms_count{engine="dagre"} 1',
+    );
+  });
+
+  test('snapshot flushes are counted with durations (NFR-7)', async () => {
+    const create = (await (
+      await fetch(`${baseUrl}/api/rooms`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+    ).json()) as { id: string };
+    // Mutate the live doc so the debounced snapshot worker flushes.
+    const room = await app.manager.getOrCreate(create.id);
+    room.doc.getMap('canvas').set('nfr7', { type: 'rectangle' });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const text = await (await fetch(`${baseUrl}/metrics`)).text();
+    expect(text).toContain('eunoia_snapshot_flush_total{outcome="success"}');
+    expect(text).toContain('eunoia_snapshot_flush_duration_ms_count');
   });
 });
 
@@ -141,6 +161,24 @@ describe('groupRoute', () => {
     );
     expect(groupRoute('GET', '/sync/abc')).toBe('WS /sync');
     expect(groupRoute('POST', '/api/compile')).toBe('POST /api/compile');
+    expect(groupRoute('GET', '/api/workspaces')).toBe('GET /api/workspaces');
+    expect(groupRoute('POST', '/api/workspaces')).toBe('POST /api/workspaces');
+    expect(groupRoute('GET', '/api/workspaces/w1')).toBe(
+      'GET /api/workspaces/:id',
+    );
+    expect(groupRoute('POST', '/api/workspaces/w1/members')).toBe(
+      'POST /api/workspaces/:id/members',
+    );
+    expect(groupRoute('POST', '/api/rooms/r1/move')).toBe(
+      'POST /api/rooms/:roomId/move',
+    );
+    expect(groupRoute('GET', '/api/audit')).toBe('GET /api/audit');
+    expect(groupRoute('GET', '/api/billing/prices')).toBe(
+      'GET /api/billing/prices',
+    );
+    expect(groupRoute('POST', '/api/billing/checkout')).toBe(
+      'POST /api/billing/checkout',
+    );
     expect(groupRoute('GET', '/nope')).toBe('OTHER');
   });
 });

@@ -21,7 +21,9 @@ describe("user tokens", () => {
 
   test("rejects wrong-secret and expired tokens", () => {
     const { token } = issueUserToken(SECRET, "user-1", 3600);
-    expect(verifyUserToken("other-secret-32-chars-long-!!!!", token)).toBeNull();
+    expect(
+      verifyUserToken("other-secret-32-chars-long-!!!!", token),
+    ).toBeNull();
     const expired = issueUserToken(SECRET, "user-1", -10);
     expect(verifyUserToken(SECRET, expired.token)).toBeNull();
   });

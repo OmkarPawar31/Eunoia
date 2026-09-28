@@ -30,7 +30,8 @@ export interface AuditStore {
 const DEFAULT_LIMIT = 50;
 
 function clampLimit(limit: number | undefined): number {
-  if (typeof limit !== "number" || !Number.isFinite(limit)) return DEFAULT_LIMIT;
+  if (typeof limit !== "number" || !Number.isFinite(limit))
+    return DEFAULT_LIMIT;
   return Math.min(200, Math.max(1, Math.floor(limit)));
 }
 
@@ -79,7 +80,9 @@ export class PrismaAuditStore implements AuditStore {
     action: string;
     target?: string | null;
   }): Promise<AuditRecord> {
-    return (await this.prisma.auditEvent.create({ data: input })) as AuditRecord;
+    return (await this.prisma.auditEvent.create({
+      data: input,
+    })) as AuditRecord;
   }
 
   async listEvents(query: AuditQuery = {}): Promise<AuditRecord[]> {

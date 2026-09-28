@@ -1,16 +1,17 @@
-import { randomUUID } from "node:crypto";
-import type { Config } from "./config.js";
-import { Room } from "./Room.js";
+import { randomUUID } from 'node:crypto';
+import type { Config } from './config.js';
+import { Room } from './Room.js';
 import {
   loadRoomDoc,
   type RoomMetadata,
   type SnapshotListOptions,
   type SnapshotStore,
   type StoredSnapshot,
-} from "./RoomLoader.js";
-import { RedisTelemetry } from "./redis.js";
-import { hashPassword, verifyPassword } from "./room-auth.js";
-import { SnapshotWorker } from "./SnapshotWorker.js";
+} from './RoomLoader.js';
+import { RedisTelemetry } from './redis.js';
+import { hashPassword, verifyPassword } from './room-auth.js';
+import type { SnapshotFlushReport } from './SnapshotWorker.js';
+import { SnapshotWorker } from './SnapshotWorker.js';
 
 export class RoomManager {
   private readonly rooms = new Map<string, Room>();
@@ -26,10 +27,11 @@ export class RoomManager {
     private readonly config: Config,
     private readonly store: SnapshotStore,
     private readonly telemetry = new RedisTelemetry(config.redisUrl),
+    private readonly onSnapshotFlush?: (report: SnapshotFlushReport) => void,
   ) {}
 
   async getOrCreate(roomId: string): Promise<Room> {
-    if (this.closing) throw new Error("Server is shutting down");
+    if (this.closing) throw new Error('Server is shutting down');
     const existing = this.rooms.get(roomId);
     if (existing) {
       this.cancelIdle(roomId);
@@ -57,9 +59,9 @@ export class RoomManager {
     const passwordHash = password ? hashPassword(password) : undefined;
     const metadata: RoomMetadata = {
       id: input?.id ?? randomUUID(),
-      name: input?.name ?? "Untitled room",
-      ownerId: input?.ownerId ?? "anonymous",
-      tier: input?.tier ?? "COMMUNITY",
+      name: input?.name ?? 'Untitled room',
+      ownerId: input?.ownerId ?? 'anonymous',
+      tier: input?.tier ?? 'COMMUNITY',
       workspaceId: input?.workspaceId ?? null,
       folderId: input?.folderId ?? null,
       hasPassword: passwordHash !== undefined,
@@ -82,7 +84,7 @@ export class RoomManager {
     updates: {
       name?: string;
       ownerId?: string;
-      tier?: RoomMetadata["tier"];
+      tier?: RoomMetadata['tier'];
       workspaceId?: string | null;
       folderId?: string | null;
     },
@@ -191,9 +193,9 @@ export class RoomManager {
   private async loadRoom(roomId: string): Promise<Room> {
     await this.store.ensureRoom({
       id: roomId,
-      name: "Untitled room",
-      ownerId: "anonymous",
-      tier: "COMMUNITY",
+      name: 'Untitled room',
+      ownerId: 'anonymous',
+      tier: 'COMMUNITY',
       workspaceId: null,
       folderId: null,
       hasPassword: false,
@@ -202,7 +204,12 @@ export class RoomManager {
     const room = new Room(
       roomId,
       doc,
-      new SnapshotWorker(roomId, this.store, this.config.snapshotDebounceMs),
+      new SnapshotWorker(
+        roomId,
+        this.store,
+        this.config.snapshotDebounceMs,
+        this.onSnapshotFlush,
+      ),
       this.telemetry,
     );
     this.rooms.set(roomId, room);

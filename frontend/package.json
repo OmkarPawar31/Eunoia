@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "bench": "bun benchmarks/culling.bench.ts && bun benchmarks/compile.bench.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

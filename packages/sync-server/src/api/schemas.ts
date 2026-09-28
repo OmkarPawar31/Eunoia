@@ -42,7 +42,13 @@ export const InviteMemberSchema = z
   .object({
     // Exactly one of userId / email identifies the invitee.
     userId: z.string().trim().min(1).max(MAX_ROOM_ID_LENGTH).optional(),
-    email: z.string().trim().toLowerCase().email().max(MAX_ROOM_ID_LENGTH).optional(),
+    email: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .email()
+      .max(MAX_ROOM_ID_LENGTH)
+      .optional(),
     role: WorkspaceRoleSchema.default("EDITOR"),
   })
   .strict()
@@ -59,7 +65,13 @@ export const UpdateMemberSchema = z
 export const MoveRoomSchema = z
   .object({
     workspaceId: z.string().trim().min(1).max(MAX_ROOM_ID_LENGTH).nullable(),
-    folderId: z.string().trim().min(1).max(MAX_ROOM_ID_LENGTH).nullable().optional(),
+    folderId: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_ROOM_ID_LENGTH)
+      .nullable()
+      .optional(),
   })
   .strict();
 
@@ -104,10 +116,10 @@ export const RegisterUserSchema = z
 export const CheckoutSchema = z
   .object({
     priceKey: z.string().trim().min(1).default("pro"),
-      // Capped: per-seat billing with unbounded quantities is a one-line
-      // API call away from absurd invoices; workspace invites enforce
-      // against this count, so 100 is generous headroom.
-      seats: z.coerce.number().int().positive().max(100).default(1),
+    // Capped: per-seat billing with unbounded quantities is a one-line
+    // API call away from absurd invoices; workspace invites enforce
+    // against this count, so 100 is generous headroom.
+    seats: z.coerce.number().int().positive().max(100).default(1),
   })
   .strict();
 

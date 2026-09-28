@@ -2,10 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import WebSocket from "ws";
 import { createSyncServer, type SyncServer } from "../src/index.js";
 import { MemorySnapshotStore } from "../src/RoomLoader.js";
-import {
-  MemoryWorkspaceStore,
-  roleAtLeast,
-} from "../src/workspaces.js";
+import { MemoryWorkspaceStore, roleAtLeast } from "../src/workspaces.js";
 
 function testConfig() {
   return {
@@ -51,12 +48,12 @@ describe("workspace role math", () => {
     });
     const listed = await store.listWorkspacesForUser("u1");
     expect(listed).toHaveLength(2);
-    expect(
-      listed.find((entry) => entry.workspace.id === owned.id)?.role,
-    ).toBe("ADMIN");
-    expect(
-      listed.find((entry) => entry.workspace.id === other.id)?.role,
-    ).toBe("EDITOR");
+    expect(listed.find((entry) => entry.workspace.id === owned.id)?.role).toBe(
+      "ADMIN",
+    );
+    expect(listed.find((entry) => entry.workspace.id === other.id)?.role).toBe(
+      "EDITOR",
+    );
     expect(await store.countMembers(other.id)).toBe(1);
     await store.removeMembership(other.id, "u1");
     expect(await store.getMembership(other.id, "u1")).toBeNull();
@@ -218,7 +215,10 @@ describe("workspace HTTP API", () => {
     const badFolder = await fetch(`${baseUrl}/api/rooms/${room.id}/move`, {
       method: "POST",
       headers: auth(owner.token),
-      body: JSON.stringify({ workspaceId: workspace.id, folderId: folder.folder.id }),
+      body: JSON.stringify({
+        workspaceId: workspace.id,
+        folderId: folder.folder.id,
+      }),
     });
     expect(badFolder.status).toBe(400);
     expect(((await badFolder.json()) as { code: string }).code).toBe(
@@ -292,10 +292,9 @@ describe("workspace HTTP API", () => {
     const outsider = await register("outsider@test.com");
     const { workspace } = await createWorkspace(owner.token);
 
-    const forbidden = await fetch(
-      `${baseUrl}/api/workspaces/${workspace.id}`,
-      { headers: auth(outsider.token) },
-    );
+    const forbidden = await fetch(`${baseUrl}/api/workspaces/${workspace.id}`, {
+      headers: auth(outsider.token),
+    });
     expect(forbidden.status).toBe(403);
 
     const ok = await fetch(`${baseUrl}/api/workspaces/${workspace.id}`, {
@@ -473,10 +472,10 @@ describe("workspace HTTP API", () => {
     const outsider = await register("deloutsider@test.com");
     const { workspace } = await createWorkspace(owner.token);
 
-    const forbidden = await fetch(
-      `${baseUrl}/api/workspaces/${workspace.id}`,
-      { method: "DELETE", headers: auth(outsider.token) },
-    );
+    const forbidden = await fetch(`${baseUrl}/api/workspaces/${workspace.id}`, {
+      method: "DELETE",
+      headers: auth(outsider.token),
+    });
     expect(forbidden.status).toBe(403);
 
     const ok = await fetch(`${baseUrl}/api/workspaces/${workspace.id}`, {
