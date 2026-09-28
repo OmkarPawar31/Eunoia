@@ -14,6 +14,15 @@ export const GenerateDiagramSchema = z
     model: z.string().trim().min(1).max(120).optional(),
   })
   .strict();
+
+export const JevVerdictSchema = z
+  .object({
+    matchesIntent: z.number().min(0).max(3),
+    likelyValid: z.number().min(0).max(1),
+    confidence: z.number().min(0).max(1),
+    warnings: z.array(z.string().max(500)),
+  })
+  .strict();
 export const WorkspaceRoleSchema = z.enum(["ADMIN", "EDITOR", "VIEWER"]);
 
 export const CreateWorkspaceSchema = z

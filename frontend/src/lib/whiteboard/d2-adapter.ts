@@ -100,6 +100,8 @@ function shapeForD2Shape(shape: string | undefined): BoardNode['shape'] {
     case 'database':
     case 'stored_data':
       return 'cylinder';
+    case 'diamond':
+      return 'diamond';
     case 'note':
       return 'note';
     case 'text':

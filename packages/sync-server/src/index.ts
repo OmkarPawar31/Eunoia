@@ -304,7 +304,13 @@ function getRoomId(req: IncomingMessage): string | undefined {
   return match?.[1] ? decodeURIComponent(match[1]) : undefined;
 }
 
-if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) {
+const isMain =
+  (import.meta as { main?: boolean }).main ||
+  (Boolean(process.argv[1]) &&
+    resolve(fileURLToPath(import.meta.url)).toLowerCase() ===
+      resolve(process.argv[1]).toLowerCase());
+
+if (isMain) {
   const config = loadConfig();
   if (!config.d2CompilerUrl) {
     logger.warn(

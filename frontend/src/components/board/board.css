@@ -718,6 +718,26 @@ circle.canvas-grid {
   stroke-width: 1.5;
 }
 
+/* Divider line shape: stroke carries the color; width comes from the node. */
+.node-line {
+  fill: none;
+  stroke-width: 3;
+}
+
+.canvas-node.is-selected .node-line {
+  filter: saturate(1.05);
+}
+
+/* Eraser + shape tools give the canvas a matching cursor. */
+.board-canvas[data-tool='eraser'] {
+  cursor: cell;
+}
+
+.board-canvas[data-tool='diamond'],
+.board-canvas[data-tool='line'] {
+  cursor: crosshair;
+}
+
 .node-label {
   fill: var(--board-ink);
   font-family: 'Excalifont', 'Comic Sans MS', cursive;

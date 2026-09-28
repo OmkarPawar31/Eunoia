@@ -6,10 +6,18 @@ export type AiQuota = {
   limit: number;
 };
 
+export type JevVerdict = {
+  matchesIntent: number;
+  likelyValid: number;
+  confidence: number;
+  warnings: string[];
+};
+
 export type GenerateResponse = {
   d2: string;
   model: string;
   quota: AiQuota;
+  jev?: JevVerdict;
 };
 
 function baseUrl(): string {

@@ -1,6 +1,22 @@
 'use client';
 
-import { D2Editor } from '@/components/editor';
+import { D2Panel } from './D2Panel';
+import { StylePanel } from './StylePanel';
+import { CanvasNode } from './CanvasNode';
+import { ArrowElement, StrokeElement } from './CanvasElements';
+import {
+  Connector,
+  PresenceAvatar,
+  ToolButton,
+  initialsForName,
+} from './board-ui';
+import { parseD2Diagnostics, type D2Diagnostic } from '@/lib/whiteboard/d2-diagnostics';
+import {
+  FALLBACK_AI_MODELS,
+  fetchAiModels,
+  loadPreferredModel,
+  storePreferredModel,
+} from '@/lib/whiteboard/ai-models';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -10,16 +26,18 @@ import {
   Circle,
   Code2,
   Cloud,
+  Diamond,
   Download,
   Ellipsis,
+  Eraser,
   Hand,
   Image as ImageIcon,
   Layers2,
-  Sparkles,
   LockKeyhole,
   Maximize2,
   Minus,
   MousePointer2,
+  MoveHorizontal,
   PanelRight,
   Pencil,
   Redo2,
@@ -41,7 +59,6 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
   type KeyboardEvent as ReactKeyboardEvent,
-  type ReactNode,
   type ChangeEvent as ReactChangeEvent,
   type WheelEvent as ReactWheelEvent,
 } from 'react';
@@ -50,7 +67,9 @@ import {
   angleOfPoint,
   cameraViewBox,
   degToRad,
+  getNodePorts,
   INITIAL_CAMERA,
+  nearestPort,
   normalizeRotation,
   panCamera,
   resizeAabb,
@@ -151,8 +170,11 @@ type ToolId =
   | 'note'
   | 'rectangle'
   | 'ellipse'
+  | 'diamond'
+  | 'line'
   | 'arrow'
   | 'draw'
+  | 'eraser'
   | 'text';
 
 type Interaction =
@@ -209,6 +231,10 @@ type Interaction =
       color: string;
       brushSize: number;
       thinning: number;
+    }
+  | {
+      kind: 'erase';
+      pointerId: number;
     };
 
 const INITIAL_NODES: BoardNode[] = [
@@ -381,23 +407,6 @@ function toneForColor(color: string): BoardNode['tone'] {
   return 'mint';
 }
 
-function smoothPath(points: Point[]): string {
-  if (points.length === 0) return '';
-  if (points.length === 1)
-    return `M ${points[0].x} ${points[0].y} L ${points[0].x + 0.1} ${points[0].y + 0.1}`;
-  if (points.length === 2)
-    return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
-
-  let d = `M ${points[0].x} ${points[0].y}`;
-  for (let i = 1; i < points.length - 1; i++) {
-    const xc = (points[i].x + points[i + 1].x) / 2;
-    const yc = (points[i].y + points[i + 1].y) / 2;
-    d += ` Q ${points[i].x} ${points[i].y}, ${xc} ${yc}`;
-  }
-  d += ` L ${points[points.length - 1].x} ${points[points.length - 1].y}`;
-  return d;
-}
-
 function strokeBounds(stroke: BoardStroke): Aabb {
   if (stroke.points.length === 0) return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
   let minX = Infinity,
@@ -419,94 +428,6 @@ function strokeBounds(stroke: BoardStroke): Aabb {
     maxX: maxX + pad,
     maxY: maxY + pad,
   };
-}
-
-/**
- * Central path router for user arrows. `straight` is the legacy `M…L`
- * segment; `orthogonal` emits axis-aligned `H/V` elbows via the segment
- * midpoint; `curved` emits a cubic with control points offset
- * perpendicular to the chord for a gentle arc.
- */
-function arrowPath(arrow: BoardArrow): string {
-  const { start, end } = arrow;
-  const routing = arrow.routing ?? 'straight';
-  if (routing === 'orthogonal') {
-    const midX = (start.x + end.x) / 2;
-    const midY = (start.y + end.y) / 2;
-    // Elbow orientation follows the dominant axis so short connectors
-    // don't zig-zag: mostly-horizontal chords bend vertically and vice versa.
-    if (Math.abs(end.x - start.x) >= Math.abs(end.y - start.y)) {
-      return `M ${start.x} ${start.y} L ${midX} ${start.y} L ${midX} ${end.y} L ${end.x} ${end.y}`;
-    }
-    return `M ${start.x} ${start.y} L ${start.x} ${midY} L ${end.x} ${midY} L ${end.x} ${end.y}`;
-  }
-  if (routing === 'curved') {
-    const dx = end.x - start.x;
-    const dy = end.y - start.y;
-    const len = Math.hypot(dx, dy) || 1;
-    // Perpendicular bow, scaled by chord length and capped for stability.
-    const bow = Math.min(60, len * 0.18);
-    const nx = -dy / len;
-    const ny = dx / len;
-    const c1x = start.x + dx * 0.3 + nx * bow;
-    const c1y = start.y + dy * 0.3 + ny * bow;
-    const c2x = start.x + dx * 0.7 + nx * bow;
-    const c2y = start.y + dy * 0.7 + ny * bow;
-    return `M ${start.x} ${start.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${end.x} ${end.y}`;
-  }
-  return `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
-}
-
-/**
- * Variable-width ink outline for a freehand stroke. Uses the brush size
- * and per-point pressure to build a tapered polygon; falls back to the
- * legacy uniform centerline smoothing when no pressure data exists so old
- * boards render identically.
- */
-function inkOutlinePath(stroke: BoardStroke): string {
-  const points = stroke.points;
-  if (points.length === 0) return '';
-  const brushSize = stroke.brushSize ?? 6;
-  const hasPressure = points.some(
-    (p) => typeof p.pressure === 'number' && Number.isFinite(p.pressure),
-  );
-  if (!hasPressure) return smoothPath(points);
-  const halfWidths = points.map((p) => {
-    const pressure =
-      typeof p.pressure === 'number' && Number.isFinite(p.pressure)
-        ? Math.min(1, Math.max(0, p.pressure))
-        : 0.5;
-    // Taper: light touches draw thin, full pressure draws the full brush.
-    return (brushSize * (0.25 + 0.75 * pressure)) / 2;
-  });
-  const left: string[] = [];
-  const right: string[] = [];
-  for (let i = 0; i < points.length; i++) {
-    const prev = points[Math.max(0, i - 1)];
-    const next = points[Math.min(points.length - 1, i + 1)];
-    let dx = next.x - prev.x;
-    let dy = next.y - prev.y;
-    const len = Math.hypot(dx, dy);
-    if (len < 0.0001) {
-      dx = 0;
-      dy = 1;
-    } else {
-      dx /= len;
-      dy /= len;
-    }
-    const nx = -dy;
-    const ny = dx;
-    const hw = halfWidths[i];
-    left.push(`${points[i].x + nx * hw} ${points[i].y + ny * hw}`);
-    right.push(`${points[i].x - nx * hw} ${points[i].y - ny * hw}`);
-  }
-  if (left.length === 1) {
-    // Single dot: render a small filled blob instead of a degenerate line.
-    const [cx, cy] = left[0].split(' ').map(Number);
-    const r = halfWidths[0];
-    return `M ${cx - r} ${cy} a ${r} ${r} 0 1 0 ${r * 2} 0 a ${r} ${r} 0 1 0 ${-r * 2} 0 Z`;
-  }
-  return `M ${left.join(' L ')} L ${right.reverse().join(' L ')} Z`;
 }
 
 /** Build an ink point from a pointer event, normalizing pen pressure. */
@@ -639,6 +560,38 @@ function nodeCenter(node: BoardNode): Point {
   };
 }
 
+/** Distance from `p` to segment `ab` (eraser hit-testing). */
+function distToSegment(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 0.000001) return Math.hypot(p.x - a.x, p.y - a.y);
+  const t = Math.min(
+    1,
+    Math.max(0, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq),
+  );
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+/** Eraser radius in world units (generous so fast swipes still hit ink). */
+const ERASER_RADIUS = 14;
+
+function strokeHitTest(stroke: BoardStroke, point: Point): boolean {
+  const pad = (stroke.brushSize ?? 6) / 2 + ERASER_RADIUS;
+  const points = stroke.points;
+  if (points.length === 1) {
+    return Math.hypot(point.x - points[0].x, point.y - points[0].y) <= pad;
+  }
+  for (let i = 0; i < points.length - 1; i++) {
+    if (distToSegment(point, points[i], points[i + 1]) <= pad) return true;
+  }
+  return false;
+}
+
+function arrowHitTest(arrow: BoardArrow, point: Point): boolean {
+  return distToSegment(point, arrow.start, arrow.end) <= ERASER_RADIUS;
+}
+
 function getAnchorPoint(node: BoardNode, targetPoint: Point): Point {
   const rotation = normalizeRotation(node.rotation ?? 0);
   const cx = node.x + node.width / 2;
@@ -664,6 +617,19 @@ function getAnchorPoint(node: BoardNode, targetPoint: Point): Point {
     local = {
       x: cx + rx * Math.cos(angle),
       y: cy + ry * Math.sin(angle),
+    };
+  } else if (node.shape === 'diamond') {
+    // Rhombus boundary: |x|/hw + |y|/hh = 1 → t = 1/(|dx|/hw + |dy|/hh).
+    const hw = node.width / 2;
+    const hh = node.height / 2;
+    const denom = Math.abs(dx) / (hw || 1) + Math.abs(dy) / (hh || 1);
+    const t = denom < 0.000001 ? 0 : 1 / denom;
+    local = { x: cx + dx * t, y: cy + dy * t };
+  } else if (node.shape === 'line') {
+    // Divider: snap to the nearer end.
+    local = {
+      x: dx >= 0 ? cx + node.width / 2 : cx - node.width / 2,
+      y: cy,
     };
   } else {
     const hw = node.width / 2;
@@ -717,6 +683,30 @@ function getRoutedAnchor(
 ): Point {
   if (routing === 'orthogonal') return getOrthogonalAnchor(node, targetPoint);
   return getAnchorPoint(node, targetPoint);
+}
+
+/** Rotation-aware point-in-node test (eraser + selection). */
+function nodeHitTest(node: BoardNode, point: Point, padding = 0): boolean {
+  const rotation = normalizeRotation(node.rotation ?? 0);
+  if (rotation === 0) {
+    return (
+      point.x >= node.x - padding &&
+      point.x <= node.x + node.width + padding &&
+      point.y >= node.y - padding &&
+      point.y <= node.y + node.height + padding
+    );
+  }
+  const center = {
+    x: node.x + node.width / 2,
+    y: node.y + node.height / 2,
+  };
+  const local = rotatePoint(point, center, -degToRad(rotation));
+  return (
+    local.x >= node.x - padding &&
+    local.x <= node.x + node.width + padding &&
+    local.y >= node.y - padding &&
+    local.y <= node.y + node.height + padding
+  );
 }
 
 function findSnapNode(
@@ -858,6 +848,8 @@ const NODE_SHAPES = new Set([
   'ellipse',
   'text',
   'image',
+  'diamond',
+  'line',
 ]);
 
 function sanitizeNode(raw: unknown): BoardNode | null {
@@ -913,6 +905,10 @@ function sanitizeNode(raw: unknown): BoardNode | null {
       n.fontSize === undefined
         ? undefined
         : clampSize(Math.round(finiteOr(n.fontSize, 16)), 8, 400),
+    z:
+      n.z === undefined
+        ? undefined
+        : clampSize(Math.round(finiteOr(n.z, 0)), -100000, 100000),
   };
 }
 
@@ -955,6 +951,10 @@ function sanitizeArrow(raw: unknown): BoardArrow | null {
       typeof a.routing === 'string' && ARROW_ROUTINGS.has(a.routing)
         ? (a.routing as ArrowRouting)
         : undefined,
+    z:
+      a.z === undefined
+        ? undefined
+        : clampSize(Math.round(finiteOr(a.z, 0)), -100000, 100000),
   };
 }
 
@@ -985,6 +985,10 @@ function sanitizeStroke(raw: unknown): BoardStroke | null {
       s.opacity === undefined
         ? undefined
         : clampSize(finiteOr(s.opacity, 1), 0.05, 1),
+    z:
+      s.z === undefined
+        ? undefined
+        : clampSize(Math.round(finiteOr(s.z, 0)), -100000, 100000),
   };
 }
 
@@ -1005,36 +1009,6 @@ function sanitizeBoardState(value: unknown): PersistedBoard | null {
     }),
     code: value.code.slice(0, 500_000),
   };
-}
-
-function reorderBySelection<T extends { id: string }>(
-  items: T[],
-  selectedIds: string[],
-  direction: 'forward' | 'backward' | 'front' | 'back',
-): T[] {
-  const selected = items.filter((item) => selectedIds.includes(item.id));
-  if (selected.length === 0) return items;
-  const remaining = items.filter((item) => !selectedIds.includes(item.id));
-  if (direction === 'front') return [...remaining, ...selected];
-  if (direction === 'back') return [...selected, ...remaining];
-  if (direction === 'forward') {
-    const next = [...items];
-    for (const item of selected) {
-      const index = next.findIndex((entry) => entry.id === item.id);
-      if (index >= 0 && index < next.length - 1) {
-        [next[index], next[index + 1]] = [next[index + 1], next[index]];
-      }
-    }
-    return next;
-  }
-  const next = [...items];
-  for (const item of [...selected].reverse()) {
-    const index = next.findIndex((entry) => entry.id === item.id);
-    if (index > 0) {
-      [next[index], next[index - 1]] = [next[index - 1], next[index]];
-    }
-  }
-  return next;
 }
 
 function downscaleImageToDataUrl(
@@ -1076,246 +1050,6 @@ function downscaleImageToDataUrl(
     img.onerror = () => resolve({ href: source, width: 400, height: 300 });
     img.src = source;
   });
-}
-
-function ToolButton({
-  label,
-  active = false,
-  onClick,
-  children,
-}: {
-  label: string;
-  active?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      className={`board-tool ${active ? 'is-active' : ''}`}
-      type="button"
-      aria-label={label}
-      aria-pressed={active}
-      title={label}
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  );
-}
-
-function PresenceAvatar({
-  initials,
-  color,
-  title,
-}: {
-  initials: string;
-  color: string;
-  title?: string;
-}) {
-  return (
-    <span
-      className="presence-avatar"
-      style={{ backgroundColor: color }}
-      aria-hidden={title ? undefined : true}
-      title={title}
-    >
-      {initials}
-    </span>
-  );
-}
-
-function initialsForName(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  const first = parts[0]?.[0] ?? '?';
-  const second =
-    parts.length > 1 ? (parts[1]?.[0] ?? '') : (parts[0]?.[1] ?? '');
-  return `${first}${second}`.toUpperCase();
-}
-
-function Connector({
-  path,
-  label,
-  labelX,
-  labelY,
-  dashed = false,
-}: {
-  path: string;
-  label: string;
-  labelX: number;
-  labelY: number;
-  dashed?: boolean;
-}) {
-  return (
-    <g className={`board-connector ${dashed ? 'is-dashed' : ''}`}>
-      <path d={path} markerEnd="url(#arrowhead)" />
-      <rect x={labelX - 44} y={labelY - 13} width="88" height="26" rx="13" />
-      <text x={labelX} y={labelY + 4} textAnchor="middle">
-        {label}
-      </text>
-    </g>
-  );
-}
-
-function CanvasNode({
-  node,
-  selected,
-  onPointerDown,
-  onDoubleClick,
-  onKeySelect,
-  onImageError,
-}: {
-  node: BoardNode;
-  selected: boolean;
-  onPointerDown: (event: ReactPointerEvent<SVGGElement>) => void;
-  onDoubleClick: () => void;
-  onKeySelect: (
-    event: ReactKeyboardEvent<SVGGElement>,
-    node: BoardNode,
-  ) => void;
-  onImageError?: (node: BoardNode) => void;
-}) {
-  const isNote = node.shape === 'note';
-  const isCylinder = node.shape === 'cylinder';
-  const isEllipse = node.shape === 'ellipse';
-  const isText = node.shape === 'text';
-  const isImage = node.shape === 'image';
-  const shapeStyle = {
-    fill: node.fill,
-    stroke: node.stroke,
-    strokeWidth: node.strokeWidth,
-    strokeDasharray: node.dashed ? '7 5' : undefined,
-    opacity: node.opacity ?? 1,
-  };
-
-  const rotation = normalizeRotation(node.rotation ?? 0);
-  const centerX = node.x + node.width / 2;
-  const centerY = node.y + node.height / 2;
-
-  return (
-    <g
-      className={`canvas-node canvas-node--${node.tone} ${isNote ? 'is-note' : ''} ${selected ? 'is-selected' : ''}`}
-      transform={
-        rotation === 0 ? undefined : `rotate(${rotation} ${centerX} ${centerY})`
-      }
-      onPointerDown={(event) => {
-        event.stopPropagation();
-        onPointerDown(event);
-      }}
-      onDoubleClick={(event) => {
-        event.stopPropagation();
-        onDoubleClick();
-      }}
-      role="button"
-      tabIndex={0}
-      aria-label={`Select ${node.label}`}
-      aria-pressed={selected}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          event.stopPropagation();
-          onKeySelect(event, node);
-        }
-      }}
-    >
-      {isImage ? (
-        <>
-          <image
-            className="node-image"
-            href={node.href}
-            crossOrigin="anonymous"
-            x={node.x}
-            y={node.y}
-            width={node.width}
-            height={node.height}
-            preserveAspectRatio="none"
-            style={{ opacity: node.opacity ?? 1 }}
-            onError={() => onImageError?.(node)}
-          />
-          <rect
-            className="node-image-frame"
-            x={node.x}
-            y={node.y}
-            width={node.width}
-            height={node.height}
-            rx="12"
-            style={{ opacity: node.opacity ?? 1 }}
-          />
-        </>
-      ) : isNote ? (
-        <path
-          className="node-note"
-          d={`M ${node.x + 10} ${node.y} h ${node.width - 22} l 12 12 v ${node.height - 24} q 0 12 -12 12 h -${node.width - 10} q -10 0 -10 -10 v -${node.height - 4} q 0 -10 10 -10`}
-          style={shapeStyle}
-        />
-      ) : isCylinder ? (
-        <>
-          <path
-            className="node-body"
-            d={`M ${node.x} ${node.y + 16} v ${node.height - 32} c 0 11 ${((node.width / 2) * 0.4526).toFixed(1)} 20 ${(node.width / 2).toFixed(1)} 20 s ${(node.width / 2).toFixed(1)} -9 ${(node.width / 2).toFixed(1)} -20 V ${node.y + 16}`}
-            style={shapeStyle}
-          />
-          <ellipse
-            className="node-cap"
-            cx={node.x + node.width / 2}
-            cy={node.y + 16}
-            rx={node.width / 2}
-            ry="20"
-            style={shapeStyle}
-          />
-          <path
-            className="node-rim"
-            d={`M ${node.x} ${node.y + 16} c 0 11 ${((node.width / 2) * 0.4526).toFixed(1)} 20 ${(node.width / 2).toFixed(1)} 20 s ${(node.width / 2).toFixed(1)} -9 ${(node.width / 2).toFixed(1)} -20`}
-            style={{ stroke: node.stroke, strokeWidth: node.strokeWidth }}
-          />
-        </>
-      ) : isEllipse ? (
-        <ellipse
-          className="node-body"
-          cx={node.x + node.width / 2}
-          cy={node.y + node.height / 2}
-          rx={node.width / 2}
-          ry={node.height / 2}
-          style={shapeStyle}
-        />
-      ) : isText ? null : (
-        <rect
-          className="node-body"
-          x={node.x}
-          y={node.y}
-          width={node.width}
-          height={node.height}
-          rx="18"
-          style={shapeStyle}
-        />
-      )}
-      {!isImage && (
-        <text
-          className={`node-label ${isText ? 'node-label--text' : ''}`}
-          x={node.x + (isText ? 0 : 18)}
-          y={
-            node.y +
-            (isText ? Math.round(node.height * 0.72) : isNote ? 42 : 43)
-          }
-          style={{
-            fontSize: isText
-              ? `${node.fontSize ?? Math.max(14, Math.round(node.height * 0.65))}px`
-              : undefined,
-          }}
-        >
-          {node.label}
-        </text>
-      )}
-      {!isText && !isImage && (
-        <text
-          className="node-detail"
-          x={node.x + 18}
-          y={node.y + (isNote ? 70 : 68)}
-        >
-          {node.detail}
-        </text>
-      )}
-    </g>
-  );
 }
 
 export function WhiteboardPage({
@@ -1405,6 +1139,21 @@ export function WhiteboardPage({
     used: number;
     limit: number;
   } | null>(null);
+  const [jevWarnings, setJevWarnings] = useState<string[]>([]);
+  const [aiModels, setAiModels] = useState<string[]>([...FALLBACK_AI_MODELS]);
+  const [aiModel, setAiModel] = useState<string>(
+    () =>
+      (typeof window !== 'undefined' ? loadPreferredModel() : null) ??
+      FALLBACK_AI_MODELS[0],
+  );
+  /** Inline Monaco markers for the latest D2 compile failure. */
+  const [d2Diagnostics, setD2Diagnostics] = useState<D2Diagnostic[]>([]);
+  /** Live magnetic port snap target while routing arrows. */
+  const [activePortSnap, setActivePortSnap] = useState<{
+    x: number;
+    y: number;
+    nodeId: string;
+  } | null>(null);
   // Thumbnail auto-capture guards: one in-flight upload, last uploaded hash.
   const thumbInFlightRef = useRef(false);
   const thumbHashRef = useRef<string | null>(null);
@@ -1454,6 +1203,14 @@ export function WhiteboardPage({
   useEffect(() => {
     arrowRoutingRef.current = arrowRouting;
   }, [arrowRouting]);
+
+  // Model picker selection mirrored into a ref so the async generate
+  // callback never sends a stale value.
+  const aiModelRef = useRef<string>(aiModel);
+
+  useEffect(() => {
+    aiModelRef.current = aiModel;
+  }, [aiModel]);
 
   const brushRef = useRef({ size: brushSize, thinning: brushThinning });
 
@@ -2057,6 +1814,55 @@ export function WhiteboardPage({
     [arrowIndex, viewBox],
   );
 
+  /**
+   * Global paint order across strokes/arrows/nodes (PRD §3.2 z-index).
+   * `z` defaults to 0 with the legacy type grouping (strokes → arrows →
+   * nodes) as tiebreak, so untouched boards render exactly as before and
+   * layer moves reorder across types.
+   */
+  const layeredElements = useMemo(() => {
+    type Layered =
+      | { kind: 'stroke'; kindOrder: 0; id: string; z: number; order: number; stroke: BoardStroke }
+      | { kind: 'arrow'; kindOrder: 1; id: string; z: number; order: number; arrow: BoardArrow }
+      | { kind: 'node'; kindOrder: 2; id: string; z: number; order: number; node: BoardNode };
+    const elements: Layered[] = [
+      ...visibleStrokes.map(
+        (stroke, order): Layered => ({
+          kind: 'stroke',
+          kindOrder: 0,
+          id: stroke.id,
+          z: stroke.z ?? 0,
+          order,
+          stroke,
+        }),
+      ),
+      ...visibleArrows.map(
+        (arrow, order): Layered => ({
+          kind: 'arrow',
+          kindOrder: 1,
+          id: arrow.id,
+          z: arrow.z ?? 0,
+          order,
+          arrow,
+        }),
+      ),
+      ...visibleNodes.map(
+        (node, order): Layered => ({
+          kind: 'node',
+          kindOrder: 2,
+          id: node.id,
+          z: node.z ?? 0,
+          order,
+          node,
+        }),
+      ),
+    ];
+    elements.sort(
+      (a, b) => a.z - b.z || a.kindOrder - b.kindOrder || a.order - b.order,
+    );
+    return elements;
+  }, [visibleArrows, visibleNodes, visibleStrokes]);
+
   // Per-color markers: `fill="context-stroke"` has spotty browser support,
   // so dynamic arrows get an explicit marker in their own color.
   const arrowMarkerIds = useMemo(() => {
@@ -2170,7 +1976,24 @@ export function WhiteboardPage({
     () => nodes.find((node) => node.id === selectedId) ?? null,
     [nodes, selectedId],
   );
-  const selectedOpacity = Math.round((selectedNode?.opacity ?? 1) * 100);
+  // Bulk-aware opacity: single node → its value; otherwise first selected
+  // stroke/node so the slider always reflects (and restyles) the selection.
+  const selectedOpacity = useMemo(() => {
+    if (selectedNode) return Math.round((selectedNode.opacity ?? 1) * 100);
+    const selectedSet = new Set(selectedIds);
+    const stroke = strokes.find((s) => selectedSet.has(s.id));
+    if (stroke) return Math.round((stroke.opacity ?? 1) * 100);
+    const node = nodes.find((n) => selectedSet.has(n.id));
+    if (node) return Math.round((node.opacity ?? 1) * 100);
+    return 100;
+  }, [nodes, selectedIds, selectedNode, strokes]);
+  /** Bulk font size: first selected node's size (slider unifies mixed). */
+  const selectedFontSize = useMemo(() => {
+    const selectedSet = new Set(selectedIds);
+    const selected = nodes.filter((n) => selectedSet.has(n.id));
+    if (selected.length === 0) return null;
+    return selected[0].fontSize ?? 16;
+  }, [nodes, selectedIds]);
   const selectedArrowCount = useMemo(
     () => arrows.filter((arrow) => selectedIds.includes(arrow.id)).length,
     [arrows, selectedIds],
@@ -2450,25 +2273,217 @@ export function WhiteboardPage({
     [captureBoardSnapshot, locked, pushDiscreteChange, selectedIds],
   );
 
+  /** Bulk op: apply opacity to every selected node AND stroke. */
+  const applyBulkOpacity = useCallback(
+    (opacity: number) => {
+      if (locked || selectedIds.length === 0) return;
+      const clamped = Math.min(1, Math.max(0.05, opacity));
+      const before = captureBoardSnapshot();
+      const nextNodes = before.nodes.map((node) =>
+        selectedIds.includes(node.id) ? { ...node, opacity: clamped } : node,
+      );
+      const nextStrokes = before.strokes.map((stroke) =>
+        selectedIds.includes(stroke.id)
+          ? { ...stroke, opacity: clamped }
+          : stroke,
+      );
+      setNodes(nextNodes);
+      setStrokes(nextStrokes);
+      pushDiscreteChange(before, {
+        ...before,
+        nodes: nextNodes,
+        strokes: nextStrokes,
+      });
+    },
+    [captureBoardSnapshot, locked, pushDiscreteChange, selectedIds],
+  );
+
+  /** Bulk op: apply font size to every selected node. */
+  const applyFontSize = useCallback(
+    (fontSize: number) => {
+      if (locked || selectedIds.length === 0) return;
+      const clamped = Math.min(400, Math.max(8, Math.round(fontSize)));
+      const before = captureBoardSnapshot();
+      const nextNodes = before.nodes.map((node) =>
+        selectedIds.includes(node.id) ? { ...node, fontSize: clamped } : node,
+      );
+      setNodes(nextNodes);
+      pushDiscreteChange(before, { ...before, nodes: nextNodes });
+    },
+    [captureBoardSnapshot, locked, pushDiscreteChange, selectedIds],
+  );
+
+  /** Bulk op: delete the whole multi-selection in one undo entry. */
+  const deleteSelected = useCallback(() => {
+    if (locked || selectedIds.length === 0) return;
+    const before = captureBoardSnapshot();
+    const nextNodes = before.nodes.filter(
+      (node) => !selectedIds.includes(node.id),
+    );
+    const nextArrows = before.arrows.filter(
+      (arrow) => !selectedIds.includes(arrow.id),
+    );
+    const nextStrokes = before.strokes.filter(
+      (stroke) => !selectedIds.includes(stroke.id),
+    );
+    setNodes(nextNodes);
+    setArrows(nextArrows);
+    setStrokes(nextStrokes);
+    setSelectedIds([]);
+    pushDiscreteChange(before, {
+      ...before,
+      nodes: nextNodes,
+      arrows: nextArrows,
+      strokes: nextStrokes,
+    });
+  }, [captureBoardSnapshot, locked, pushDiscreteChange, selectedIds]);
+
+  /**
+   * Eraser hit-test at a world point. Removes the topmost node under the
+   * cursor plus any strokes/arrows within radius. Reads live refs so
+   * pointer-move swipes erase continuously; the gesture base staged at
+   * pointer-down makes the whole swipe a single undo entry on release.
+   */
+  const eraseAtPoint = useCallback((worldPoint: Point) => {
+    let erased = false;
+    setStrokes((current) => {
+      const next = current.filter(
+        (stroke) => !strokeHitTest(stroke, worldPoint),
+      );
+      if (next.length !== current.length) erased = true;
+      return next;
+    });
+    setArrows((current) => {
+      const next = current.filter(
+        (arrow) => !arrowHitTest(arrow, worldPoint),
+      );
+      if (next.length !== current.length) erased = true;
+      return next;
+    });
+    // Only the topmost node per tick so swipes don't nuke stacks; strokes
+    // and arrows erase aggressively since they're cheap to redraw. Read the
+    // live ref (not the updater) so selection updates stay outside it.
+    const hit = [...nodesRef.current]
+      .reverse()
+      .find((node) => nodeHitTest(node, worldPoint));
+    if (hit) {
+      erased = true;
+      setSelectedIds((ids) => ids.filter((id) => id !== hit.id));
+      setNodes((current) => current.filter((node) => node.id !== hit.id));
+    }
+    return erased;
+  }, []);
+
   const moveSelectedLayer = useCallback(
     (direction: 'forward' | 'backward' | 'front' | 'back') => {
       if (locked || selectedIds.length === 0) return;
       const before = captureBoardSnapshot();
-      const nextNodes = reorderBySelection(
-        before.nodes,
-        selectedIds,
-        direction,
+      const selected = new Set(selectedIds);
+      type Entry = {
+        kind: 'stroke' | 'arrow' | 'node';
+        id: string;
+        z: number;
+        index: number;
+      };
+      // Legacy render order (strokes → arrows → nodes) is the tiebreak so
+      // boards without explicit `z` keep their look until first moved.
+      const kindOrder = { stroke: 0, arrow: 1, node: 2 } as const;
+      const entries: Entry[] = [
+        ...before.strokes.map((s, index) => ({
+          kind: 'stroke' as const,
+          id: s.id,
+          z: s.z ?? 0,
+          index,
+        })),
+        ...before.arrows.map((a, index) => ({
+          kind: 'arrow' as const,
+          id: a.id,
+          z: a.z ?? 0,
+          index,
+        })),
+        ...before.nodes.map((n, index) => ({
+          kind: 'node' as const,
+          id: n.id,
+          z: n.z ?? 0,
+          index,
+        })),
+      ];
+      entries.sort(
+        (a, b) =>
+          a.z - b.z || kindOrder[a.kind] - kindOrder[b.kind] || a.index - b.index,
       );
-      const nextArrows = reorderBySelection(
-        before.arrows,
-        selectedIds,
-        direction,
-      );
-      const nextStrokes = reorderBySelection(
-        before.strokes,
-        selectedIds,
-        direction,
-      );
+      // Normalize to distinct ranks so forward/backward swaps always move.
+      const rankById = new Map(entries.map((e, rank) => [`${e.kind}:${e.id}`, rank]));
+      const zOf = (kind: Entry['kind'], id: string) =>
+        rankById.get(`${kind}:${id}`) ?? 0;
+      const setZ = (
+        nodes: BoardNode[],
+        arrows: BoardArrow[],
+        strokes: BoardStroke[],
+      ) => ({
+        nodes: nodes.map((n) => ({ ...n, z: zOf('node', n.id) })),
+        arrows: arrows.map((a) => ({ ...a, z: zOf('arrow', a.id) })),
+        strokes: strokes.map((s) => ({ ...s, z: zOf('stroke', s.id) })),
+      });
+      const normalized = setZ(before.nodes, before.arrows, before.strokes);
+      const ordered = entries.map((e) => ({ ...e, z: zOf(e.kind, e.id) }));
+      const isSelected = (e: Entry) => selected.has(e.id);
+      if (direction === 'front' || direction === 'back') {
+        const selectedOrdered = ordered
+          .filter(isSelected)
+          .sort((a, b) => a.z - b.z);
+        if (selectedOrdered.length === 0) return;
+        if (direction === 'front') {
+          let top = Math.max(...ordered.map((e) => e.z));
+          for (const e of selectedOrdered) {
+            top += 1;
+            rankById.set(`${e.kind}:${e.id}`, top);
+          }
+        } else {
+          let bottom = Math.min(...ordered.map((e) => e.z));
+          for (const e of [...selectedOrdered].reverse()) {
+            bottom -= 1;
+            rankById.set(`${e.kind}:${e.id}`, bottom);
+          }
+        }
+      } else {
+        // Single-step swaps against the nearest unselected neighbor so a
+        // multi-selection moves as a block without leapfrogging itself.
+        const pool = [...ordered].sort((a, b) => a.z - b.z);
+        const orderedSelected =
+          direction === 'forward'
+            ? pool.filter(isSelected).sort((a, b) => b.z - a.z)
+            : pool.filter(isSelected).sort((a, b) => a.z - b.z);
+        if (orderedSelected.length === 0) return;
+        for (const e of orderedSelected) {
+          const idx = pool.findIndex(
+            (entry) => entry.kind === e.kind && entry.id === e.id,
+          );
+          const neighborIdx =
+            direction === 'forward' ? idx + 1 : idx - 1;
+          const neighbor = pool[neighborIdx];
+          if (!neighbor || isSelected(neighbor)) continue;
+          const ez = rankById.get(`${e.kind}:${e.id}`) as number;
+          const nz = rankById.get(`${neighbor.kind}:${neighbor.id}`) as number;
+          rankById.set(`${e.kind}:${e.id}`, nz);
+          rankById.set(`${neighbor.kind}:${neighbor.id}`, ez);
+          // Keep the pool order in sync for subsequent swaps this pass.
+          pool[idx] = { ...neighbor, z: ez };
+          pool[neighborIdx] = { ...e, z: nz };
+        }
+      }
+      const nextNodes = normalized.nodes.map((n) => ({
+        ...n,
+        z: rankById.get(`node:${n.id}`) ?? n.z ?? 0,
+      }));
+      const nextArrows = normalized.arrows.map((a) => ({
+        ...a,
+        z: rankById.get(`arrow:${a.id}`) ?? a.z ?? 0,
+      }));
+      const nextStrokes = normalized.strokes.map((s) => ({
+        ...s,
+        z: rankById.get(`stroke:${s.id}`) ?? s.z ?? 0,
+      }));
       setNodes(nextNodes);
       setArrows(nextArrows);
       setStrokes(nextStrokes);
@@ -2481,6 +2496,31 @@ export function WhiteboardPage({
     },
     [captureBoardSnapshot, locked, pushDiscreteChange, selectedIds],
   );
+
+  /** Highest z on the board (new elements land on top). */
+  const topZ = useCallback((): number => {
+    let top = 0;
+    let seen = false;
+    for (const n of nodesRef.current) {
+      if (n.z !== undefined) {
+        top = seen ? Math.max(top, n.z) : n.z;
+        seen = true;
+      }
+    }
+    for (const a of arrowsRef.current) {
+      if (a.z !== undefined) {
+        top = seen ? Math.max(top, a.z) : a.z;
+        seen = true;
+      }
+    }
+    for (const s of strokesRef.current) {
+      if (s.z !== undefined) {
+        top = seen ? Math.max(top, s.z) : s.z;
+        seen = true;
+      }
+    }
+    return top + 1;
+  }, []);
 
   const handleResizePointerDown = useCallback(
     (event: ReactPointerEvent<SVGRectElement>, handle: string) => {
@@ -2625,6 +2665,19 @@ export function WhiteboardPage({
 
       if (locked) return;
 
+      if (activeTool === 'eraser') {
+        // Clicking an element with the eraser deletes under the cursor;
+        // the swipe continues on the canvas (see handleCanvasPointerMove).
+        beginGesture();
+        eraseAtPoint(worldPoint);
+        interactionRef.current = {
+          kind: 'erase',
+          pointerId: event.pointerId,
+        };
+        canvasRef.current.setPointerCapture(event.pointerId);
+        return;
+      }
+
       gestureBaseRef.current = null;
       let nextSelected: string[];
       if (event.shiftKey) {
@@ -2691,6 +2744,7 @@ export function WhiteboardPage({
       arrows,
       canvasViewport,
       beginGesture,
+      eraseAtPoint,
       locked,
       nodes,
       selectedIds,
@@ -2771,6 +2825,16 @@ export function WhiteboardPage({
         cameraRef.current,
         canvasViewport,
       );
+      if (activeTool === 'eraser') {
+        beginGesture();
+        eraseAtPoint(worldPoint);
+        interactionRef.current = {
+          kind: 'erase',
+          pointerId: event.pointerId,
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        return;
+      }
       if (activeTool === 'draw') {
         beginGesture();
         interactionRef.current = {
@@ -2794,7 +2858,7 @@ export function WhiteboardPage({
       }
       event.currentTarget.setPointerCapture(event.pointerId);
     },
-    [activeColor, activeTool, canvasViewport, beginGesture, locked],
+    [activeColor, activeTool, canvasViewport, beginGesture, eraseAtPoint, locked],
   );
 
   const handleCanvasPointerMove = useCallback(
@@ -2830,6 +2894,11 @@ export function WhiteboardPage({
         canvasViewport,
       );
 
+      if (interaction.kind === 'erase') {
+        eraseAtPoint(worldPoint);
+        return;
+      }
+
       if (interaction.kind === 'arrowEndpoint') {
         beginGesture();
         const currentArrow = arrowsRef.current.find(
@@ -2838,22 +2907,36 @@ export function WhiteboardPage({
         if (!currentArrow) return;
 
         const currentNodes = nodesRef.current;
-        const targetNode = findSnapNode(worldPoint, currentNodes);
+        // Magnetic port snap first (exact port position), then the legacy
+        // bounding-box anchor as a fallback for imprecise drops.
+        const portHit = nearestPort(worldPoint, currentNodes);
+        const targetNode = portHit
+          ? portHit.node
+          : findSnapNode(worldPoint, currentNodes);
         let newPoint = worldPoint;
         let boundNodeId: string | undefined = undefined;
 
         if (targetNode) {
           boundNodeId = targetNode.id;
-          const otherPoint =
-            interaction.endpoint === 'start'
-              ? currentArrow.end
-              : currentArrow.start;
-          newPoint = getRoutedAnchor(
-            targetNode,
-            otherPoint,
-            currentArrow.routing,
-          );
+          if (portHit && portHit.node.id === targetNode.id) {
+            newPoint = { x: portHit.port.x, y: portHit.port.y };
+          } else {
+            const otherPoint =
+              interaction.endpoint === 'start'
+                ? currentArrow.end
+                : currentArrow.start;
+            newPoint = getRoutedAnchor(
+              targetNode,
+              otherPoint,
+              currentArrow.routing,
+            );
+          }
         }
+        setActivePortSnap(
+          targetNode
+            ? { x: newPoint.x, y: newPoint.y, nodeId: targetNode.id }
+            : null,
+        );
 
         setArrows((current) =>
           current.map((arrow) => {
@@ -3284,14 +3367,30 @@ export function WhiteboardPage({
       }
 
       if (interaction.kind === 'create') {
+        // Magnetic preview for connectors: snap the live end to the nearest
+        // port so users see the snap before releasing.
+        let previewEnd = worldPoint;
+        let snapNodeId: string | null = null;
+        if (interaction.tool === 'arrow') {
+          const portHit = nearestPort(worldPoint, nodesRef.current);
+          if (portHit) {
+            previewEnd = { x: portHit.port.x, y: portHit.port.y };
+            snapNodeId = portHit.node.id;
+          }
+        }
         interactionRef.current = {
           ...interaction,
-          currentWorld: worldPoint,
+          currentWorld: previewEnd,
         };
+        setActivePortSnap(
+          snapNodeId
+            ? { x: previewEnd.x, y: previewEnd.y, nodeId: snapNodeId }
+            : null,
+        );
         setCreatePreview({
           tool: interaction.tool,
           start: interaction.startWorld,
-          end: worldPoint,
+          end: previewEnd,
           color: interaction.color,
         });
         return;
@@ -3321,7 +3420,7 @@ export function WhiteboardPage({
         setSelectedIds(liveSelected);
       }
     },
-    [canvasViewport, beginGesture],
+    [canvasViewport, beginGesture, eraseAtPoint],
   );
 
   const handleCanvasPointerUp = useCallback(
@@ -3354,10 +3453,11 @@ export function WhiteboardPage({
         const brushSize = interaction.brushSize;
         const thinning = interaction.thinning;
         const committedId = nextId('stroke');
+        const committedZ = topZ();
         setStrokes((current) =>
           current.map((stroke) =>
             stroke.id === `draft-${interaction.pointerId}`
-              ? { ...stroke, id: committedId, points, brushSize, thinning }
+              ? { ...stroke, id: committedId, points, brushSize, thinning, z: committedZ }
               : stroke,
           ),
         );
@@ -3370,7 +3470,7 @@ export function WhiteboardPage({
           ...live,
           strokes: live.strokes.map((stroke) =>
             stroke.id === `draft-${interaction.pointerId}`
-              ? { ...stroke, id: committedId, points, brushSize, thinning }
+              ? { ...stroke, id: committedId, points, brushSize, thinning, z: committedZ }
               : stroke,
           ),
         });
@@ -3382,19 +3482,35 @@ export function WhiteboardPage({
         return;
       }
 
+      if (interaction.kind === 'erase') {
+        // Whole swipe staged at pointer-down: one undo entry.
+        interactionRef.current = null;
+        commitGesture();
+        flushPendingRemote();
+        setActivePortSnap(null);
+        gestureBaseRef.current = null;
+        if (event.currentTarget.hasPointerCapture(event.pointerId))
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        return;
+      }
+
       if (interaction.kind === 'create') {
         setCreatePreview(null);
+        setActivePortSnap(null);
         const start = interaction.startWorld;
-        const end = worldPoint;
+        // Arrow previews already carry the port-snapped end in currentWorld.
+        const end =
+          interaction.tool === 'arrow' ? interaction.currentWorld : worldPoint;
         const minX = Math.min(start.x, end.x);
         const minY = Math.min(start.y, end.y);
+        const isLineTool = interaction.tool === 'line';
         const width = Math.max(
           Math.abs(end.x - start.x),
-          interaction.tool === 'text' ? 160 : 96,
+          interaction.tool === 'text' ? 160 : isLineTool ? 120 : 96,
         );
         const height = Math.max(
           Math.abs(end.y - start.y),
-          interaction.tool === 'text' ? 36 : 76,
+          interaction.tool === 'text' ? 36 : isLineTool ? 24 : 76,
         );
         const centerX = (start.x + end.x) / 2;
         const centerY = (start.y + end.y) / 2;
@@ -3405,31 +3521,60 @@ export function WhiteboardPage({
               ? end
               : { x: start.x + 140, y: start.y };
           const currentNodes = nodesRef.current;
-          const startNode = findSnapNode(start, currentNodes);
-          const endNode = findSnapNode(rawEnd, currentNodes);
+          // Magnetic ports win over bounding-box proximity at both ends.
+          const startPort = nearestPort(start, currentNodes);
+          const endPort = nearestPort(rawEnd, currentNodes);
+          const startNode = startPort
+            ? startPort.node
+            : findSnapNode(start, currentNodes);
+          const endNode = endPort
+            ? endPort.node
+            : findSnapNode(rawEnd, currentNodes);
 
-          let finalStart = start;
-          let finalEnd = rawEnd;
+          let finalStart = startPort
+            ? { x: startPort.port.x, y: startPort.port.y }
+            : start;
+          let finalEnd = endPort
+            ? { x: endPort.port.x, y: endPort.port.y }
+            : rawEnd;
 
-          if (startNode && endNode && startNode.id !== endNode.id) {
+          if (!startPort && !endPort) {
+            if (startNode && endNode && startNode.id !== endNode.id) {
+              finalStart = getRoutedAnchor(
+                startNode,
+                nodeCenter(endNode),
+                arrowRoutingRef.current,
+              );
+              finalEnd = getRoutedAnchor(
+                endNode,
+                nodeCenter(startNode),
+                arrowRoutingRef.current,
+              );
+            } else if (startNode) {
+              finalStart = getRoutedAnchor(
+                startNode,
+                rawEnd,
+                arrowRoutingRef.current,
+              );
+            } else if (endNode) {
+              finalEnd = getRoutedAnchor(
+                endNode,
+                start,
+                arrowRoutingRef.current,
+              );
+            }
+          } else if (!startPort && startNode) {
             finalStart = getRoutedAnchor(
               startNode,
-              nodeCenter(endNode),
+              finalEnd,
               arrowRoutingRef.current,
             );
+          } else if (!endPort && endNode) {
             finalEnd = getRoutedAnchor(
               endNode,
-              nodeCenter(startNode),
+              finalStart,
               arrowRoutingRef.current,
             );
-          } else if (startNode) {
-            finalStart = getRoutedAnchor(
-              startNode,
-              rawEnd,
-              arrowRoutingRef.current,
-            );
-          } else if (endNode) {
-            finalEnd = getRoutedAnchor(endNode, start, arrowRoutingRef.current);
           }
 
           const createdArrow: BoardArrow = {
@@ -3440,6 +3585,7 @@ export function WhiteboardPage({
             startNodeId: startNode?.id,
             endNodeId: endNode?.id,
             routing: arrowRoutingRef.current,
+            z: topZ(),
           };
           setArrows((current) => [...current, createdArrow]);
           const liveAfterCreate =
@@ -3454,9 +3600,13 @@ export function WhiteboardPage({
               ? 'note'
               : interaction.tool === 'ellipse'
                 ? 'ellipse'
-                : interaction.tool === 'text'
-                  ? 'text'
-                  : 'round';
+                : interaction.tool === 'diamond'
+                  ? 'diamond'
+                  : interaction.tool === 'line'
+                    ? 'line'
+                    : interaction.tool === 'text'
+                      ? 'text'
+                      : 'round';
           const node: BoardNode = {
             id: nextId(interaction.tool),
             label:
@@ -3464,13 +3614,21 @@ export function WhiteboardPage({
                 ? 'New thought'
                 : interaction.tool === 'text'
                   ? 'Text'
-                  : 'New shape',
+                  : interaction.tool === 'diamond'
+                    ? 'Decision'
+                    : interaction.tool === 'line'
+                      ? ''
+                      : 'New shape',
             detail:
               interaction.tool === 'note'
                 ? 'Click twice to refine'
                 : interaction.tool === 'text'
                   ? ''
-                  : 'Canvas object',
+                  : interaction.tool === 'diamond'
+                    ? 'Yes / no?'
+                    : interaction.tool === 'line'
+                      ? ''
+                      : 'Canvas object',
             x: snapPoint({
               x: interaction.tool === 'text' ? minX : centerX - width / 2,
               y: interaction.tool === 'text' ? minY : centerY - height / 2,
@@ -3480,12 +3638,13 @@ export function WhiteboardPage({
               y: interaction.tool === 'text' ? minY : centerY - height / 2,
             }).y,
             width,
-            height,
+            height: isLineTool ? Math.min(height, 32) : height,
             tone:
               interaction.tool === 'note'
                 ? 'note'
                 : toneForColor(interaction.color),
             shape,
+            z: topZ(),
           };
           setNodes((current) => [...current, node]);
           setSelectedIds([node.id]);
@@ -3548,7 +3707,7 @@ export function WhiteboardPage({
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
     },
-    [canvasViewport, commitGesture, flushPendingRemote],
+    [canvasViewport, commitGesture, flushPendingRemote, topZ],
   );
 
   const cancelInteraction = useCallback(() => {
@@ -3576,6 +3735,7 @@ export function WhiteboardPage({
     gestureBaseRef.current = null;
     viewportRectRef.current = null;
     setMarquee(null);
+    setActivePortSnap(null);
     flushPendingRemote();
   }, [flushPendingRemote]);
 
@@ -4043,6 +4203,15 @@ export function WhiteboardPage({
           case 'e':
             selectTool('ellipse');
             break;
+          case 'm':
+            selectTool('diamond');
+            break;
+          case 'l':
+            selectTool('line');
+            break;
+          case 'x':
+            selectTool('eraser');
+            break;
           case 'a':
             selectTool('arrow');
             break;
@@ -4375,6 +4544,7 @@ export function WhiteboardPage({
       }, 5000);
       setCode(value);
       setCompileState('draft');
+      setD2Diagnostics([]);
     },
     [pushUndoEntry],
   );
@@ -4498,7 +4668,17 @@ export function WhiteboardPage({
                 )
                 .join('; ')})`
             : '';
-        throw new Error(`${message}${hint}${details}`);
+        const fullMessage = `${message}${hint}${details}`;
+        // Inline editor diagnostics alongside the banner (positions parsed
+        // from `line:col` compiler output; tier/validation errors stay
+        // banner-only).
+        setD2Diagnostics(
+          parseD2Diagnostics(
+            fullMessage,
+            typeof body?.code === 'string' ? body.code : undefined,
+          ),
+        );
+        throw new Error(fullMessage);
       }
       const diagram = parseCompileResponse(payload);
       if (!diagram) {
@@ -4540,6 +4720,7 @@ export function WhiteboardPage({
       setSelectedIds((current) => current.filter((id) => keptIds.has(id)));
       setCompileState('compiled');
       setBoardError(null);
+      setD2Diagnostics([]);
       // Reconcile is a local op: capture it so undo restores the
       // pre-compile arrangement without touching peer edits.
       pushDiscreteChange(before, {
@@ -4550,10 +4731,15 @@ export function WhiteboardPage({
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       setCompileState('draft');
-      setBoardError(
+      const message =
         error instanceof Error
           ? error.message
-          : 'D2 compilation failed. Try again.',
+          : 'D2 compilation failed. Try again.';
+      setBoardError(message);
+      // Non-HTTP failures (network, invalid payload): surface positions
+      // when the text carries them, never a pinned line-1 marker.
+      setD2Diagnostics((current) =>
+        current.length > 0 ? current : parseD2Diagnostics(message),
       );
     } finally {
       if (compileAbortRef.current === controller)
@@ -4578,14 +4764,17 @@ export function WhiteboardPage({
     if (locked) return;
     setAiBusy(true);
     setBoardError(null);
+    setJevWarnings([]);
     try {
       const { generateDiagram } = await import('@/lib/whiteboard/ai-api');
       const result = await generateDiagram(prompt, {
         roomId: roomId ?? undefined,
         ticket: roomId ? getTicket(roomId) : undefined,
         userToken: resolveUserToken(),
+        model: aiModelRef.current,
       });
       setAiQuota(result.quota);
+      setJevWarnings(result.jev?.warnings ?? []);
       setAiPrompt('');
       handleCodeChange(result.d2);
     } catch (error) {
@@ -4598,6 +4787,24 @@ export function WhiteboardPage({
         setBoardError(
           'AI generation is not configured on this server. Set AI_API_KEY to enable it.',
         );
+      } else if (error instanceof ApiError && error.code === 'JEV_BLOCKED') {
+        setBoardError(
+          'Prompt blocked by AI guardrails (suspected prompt injection). Rephrase as a diagram description.',
+        );
+      } else if (
+        error instanceof ApiError &&
+        error.code === 'JEV_LOW_INTENT'
+      ) {
+        setBoardError(
+          'That does not look like a diagram request. Describe nodes and connections.',
+        );
+      } else if (
+        error instanceof ApiError &&
+        error.code === 'JEV_UNAVAILABLE'
+      ) {
+        setBoardError(
+          'AI guardrails are temporarily unavailable. Try again shortly.',
+        );
       } else {
         setBoardError(
           error instanceof Error ? error.message : 'AI generation failed.',
@@ -4607,6 +4814,34 @@ export function WhiteboardPage({
       setAiBusy(false);
     }
   }, [aiBusy, aiPrompt, handleCodeChange, locked, resolveUserToken, roomId]);
+
+  const selectAiModel = useCallback((model: string) => {
+    const trimmed = model.trim();
+    if (!trimmed) return;
+    aiModelRef.current = trimmed;
+    setAiModel(trimmed);
+    storePreferredModel(trimmed);
+  }, []);
+
+  // Advertise server models once per mount; the stored preference wins when
+  // the server still offers it.
+  useEffect(() => {
+    let cancelled = false;
+    void fetchAiModels().then((listed) => {
+      if (cancelled) return;
+      setAiModels(listed.models);
+      const preferred = loadPreferredModel();
+      const next =
+        preferred && listed.models.includes(preferred)
+          ? preferred
+          : listed.default;
+      aiModelRef.current = next;
+      setAiModel(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Auto-compile a short pause after the user stops typing, as promised by
   // the footer copy. Skips when the code already matches the last success.
@@ -5461,28 +5696,49 @@ export function WhiteboardPage({
               <Square size={18} />
             </ToolButton>
             <ToolButton
-              label="Ellipse"
+              label="Ellipse (E)"
               active={activeTool === 'ellipse'}
               onClick={() => selectTool('ellipse')}
             >
               <Circle size={18} />
             </ToolButton>
             <ToolButton
-              label="Connector"
+              label="Diamond decision (M)"
+              active={activeTool === 'diamond'}
+              onClick={() => selectTool('diamond')}
+            >
+              <Diamond size={18} />
+            </ToolButton>
+            <ToolButton
+              label="Divider line (L)"
+              active={activeTool === 'line'}
+              onClick={() => selectTool('line')}
+            >
+              <MoveHorizontal size={18} />
+            </ToolButton>
+            <ToolButton
+              label="Connector (A)"
               active={activeTool === 'arrow'}
               onClick={() => selectTool('arrow')}
             >
               <ArrowRight size={18} />
             </ToolButton>
             <ToolButton
-              label="Draw"
+              label="Draw (D)"
               active={activeTool === 'draw'}
               onClick={() => selectTool('draw')}
             >
               <Pencil size={18} />
             </ToolButton>
             <ToolButton
-              label="Text"
+              label="Eraser (X)"
+              active={activeTool === 'eraser'}
+              onClick={() => selectTool('eraser')}
+            >
+              <Eraser size={18} />
+            </ToolButton>
+            <ToolButton
+              label="Text (T)"
               active={activeTool === 'text'}
               onClick={() => selectTool('text')}
             >
@@ -5589,6 +5845,20 @@ export function WhiteboardPage({
               <Circle size={17} />
             </ToolButton>
             <ToolButton
+              label="Diamond decision"
+              active={activeTool === 'diamond'}
+              onClick={() => selectTool('diamond')}
+            >
+              <Diamond size={17} />
+            </ToolButton>
+            <ToolButton
+              label="Divider line"
+              active={activeTool === 'line'}
+              onClick={() => selectTool('line')}
+            >
+              <MoveHorizontal size={17} />
+            </ToolButton>
+            <ToolButton
               label="Connector"
               active={activeTool === 'arrow'}
               onClick={() => selectTool('arrow')}
@@ -5601,6 +5871,13 @@ export function WhiteboardPage({
               onClick={() => selectTool('draw')}
             >
               <Pencil size={17} />
+            </ToolButton>
+            <ToolButton
+              label="Eraser"
+              active={activeTool === 'eraser'}
+              onClick={() => selectTool('eraser')}
+            >
+              <Eraser size={17} />
             </ToolButton>
             <ToolButton
               label="Text"
@@ -5625,352 +5902,31 @@ export function WhiteboardPage({
           </div>
 
           {stylePanelOpen ? (
-            <aside
-              className="board-style-panel"
-              aria-label="Selected object style"
-            >
-              <div className="style-panel-title">
-                <div>
-                  <span>Style</span>
-                  <small>
-                    {selectedNode && selectedId
-                      ? selectedNode.label
-                      : 'Nothing selected'}
-                  </small>
-                </div>
-                <button
-                  type="button"
-                  aria-label="Close style panel"
-                  onClick={() => setStylePanelOpen(false)}
-                >
-                  <Ellipsis size={16} />
-                </button>
-              </div>
-              <fieldset
-                disabled={locked}
-                style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}
-              >
-                <div className="style-section">
-                  <span className="style-label">Stroke</span>
-                  <div className="style-swatch-row">
-                    <button
-                      className="style-swatch style-swatch--ink is-selected"
-                      type="button"
-                      aria-label="Ink stroke"
-                      onClick={() => applySelectedColor('#25263a', 'mint')}
-                    />
-                    <button
-                      className="style-swatch style-swatch--red"
-                      type="button"
-                      aria-label="Red stroke"
-                      onClick={() => applySelectedColor('#df4c54', 'orange')}
-                    />
-                    <button
-                      className="style-swatch style-swatch--green"
-                      type="button"
-                      aria-label="Green stroke"
-                      onClick={() => applySelectedColor('#3caa62', 'mint')}
-                    />
-                    <button
-                      className="style-swatch style-swatch--blue"
-                      type="button"
-                      aria-label="Blue stroke"
-                      onClick={() => applySelectedColor('#4a86c6', 'blue')}
-                    />
-                    <button
-                      className="style-swatch style-swatch--orange"
-                      type="button"
-                      aria-label="Orange stroke"
-                      onClick={() => applySelectedColor('#ef8c52', 'orange')}
-                    />
-                    <button
-                      className="style-swatch style-swatch--yellow"
-                      type="button"
-                      aria-label="Yellow stroke"
-                      onClick={() => applySelectedColor('#f7d66f', 'yellow')}
-                    />
-                  </div>
-                </div>
-                <div className="style-section">
-                  <span className="style-label">Background</span>
-                  <div className="style-swatch-row">
-                    <button
-                      className="style-swatch style-swatch--transparent"
-                      type="button"
-                      aria-label="Transparent background"
-                      onClick={() => updateSelectedNodes({ fill: 'none' })}
-                    />
-                    <button
-                      className="style-swatch style-swatch--lavender"
-                      type="button"
-                      aria-label="Lavender background"
-                      onClick={() => updateSelectedNodes({ fill: '#dbd7fa' })}
-                    />
-                    <button
-                      className="style-swatch style-swatch--peach"
-                      type="button"
-                      aria-label="Peach background"
-                      onClick={() => updateSelectedNodes({ fill: '#ffc8be' })}
-                    />
-                    <button
-                      className="style-swatch style-swatch--mint"
-                      type="button"
-                      aria-label="Mint background"
-                      onClick={() => updateSelectedNodes({ fill: '#b9ebcf' })}
-                    />
-                    <button
-                      className="style-swatch style-swatch--sky"
-                      type="button"
-                      aria-label="Sky background"
-                      onClick={() => updateSelectedNodes({ fill: '#badff3' })}
-                    />
-                    <button
-                      className="style-swatch style-swatch--lemon"
-                      type="button"
-                      aria-label="Lemon background"
-                      onClick={() => updateSelectedNodes({ fill: '#ffe895' })}
-                    />
-                  </div>
-                </div>
-                <div className="style-section style-section--split">
-                  <div>
-                    <span className="style-label">Stroke width</span>
-                    <div className="style-choice-row">
-                      <button
-                        className="style-choice"
-                        type="button"
-                        aria-label="Thin stroke"
-                        onClick={() =>
-                          updateSelectedNodes({ strokeWidth: 1.5 })
-                        }
-                      >
-                        <Minus size={16} />
-                      </button>
-                      <button
-                        className="style-choice is-selected"
-                        type="button"
-                        aria-label="Medium stroke"
-                        onClick={() => updateSelectedNodes({ strokeWidth: 2 })}
-                      >
-                        <Minus size={16} strokeWidth={2.6} />
-                      </button>
-                      <button
-                        className="style-choice"
-                        type="button"
-                        aria-label="Thick stroke"
-                        onClick={() => updateSelectedNodes({ strokeWidth: 4 })}
-                      >
-                        <Minus size={16} strokeWidth={4} />
-                      </button>
-                    </div>
-                  </div>
-                  <div>
-                    <span className="style-label">Stroke style</span>
-                    <div className="style-choice-row">
-                      <button
-                        className="style-choice is-selected"
-                        type="button"
-                        aria-label="Solid stroke"
-                        onClick={() => updateSelectedNodes({ dashed: false })}
-                      >
-                        <Minus size={16} />
-                      </button>
-                      <button
-                        className="style-choice"
-                        type="button"
-                        aria-label="Dashed stroke"
-                        onClick={() => updateSelectedNodes({ dashed: true })}
-                      >
-                        <Minus size={16} strokeDasharray="3 3" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                <div className="style-section">
-                  <span className="style-label">Connector routing</span>
-                  <div className="style-choice-row">
-                    {(
-                      [
-                        { id: 'straight', label: 'Straight' },
-                        { id: 'orthogonal', label: 'Orthogonal' },
-                        { id: 'curved', label: 'Curved' },
-                      ] as Array<{ id: ArrowRouting; label: string }>
-                    ).map((option) => {
-                      const isActive =
-                        (selectedArrowRouting ?? arrowRouting) === option.id;
-                      return (
-                        <button
-                          key={option.id}
-                          className={`style-choice ${isActive ? 'is-selected' : ''}`}
-                          type="button"
-                          aria-label={`${option.label} routing`}
-                          aria-pressed={isActive}
-                          title={
-                            selectedArrowCount > 0
-                              ? `Apply ${option.label.toLowerCase()} routing to selection`
-                              : `New arrows use ${option.label.toLowerCase()} routing`
-                          }
-                          onClick={() => applyArrowRouting(option.id)}
-                        >
-                          <svg
-                            width="22"
-                            height="14"
-                            viewBox="0 0 22 14"
-                            aria-hidden="true"
-                          >
-                            {option.id === 'straight' && (
-                              <line
-                                x1="2"
-                                y1="12"
-                                x2="20"
-                                y2="2"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                              />
-                            )}
-                            {option.id === 'orthogonal' && (
-                              <path
-                                d="M 2 12 L 2 7 L 20 7 L 20 2"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                              />
-                            )}
-                            {option.id === 'curved' && (
-                              <path
-                                d="M 2 12 C 8 12, 14 2, 20 2"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                              />
-                            )}
-                          </svg>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-                <div className="style-section style-section--split">
-                  <div>
-                    <span className="style-label">Brush size</span>
-                    <div className="style-choice-row">
-                      {[
-                        { size: 4, label: 'Fine pen' },
-                        { size: 8, label: 'Medium pen' },
-                        { size: 16, label: 'Thick pen' },
-                      ].map((option) => (
-                        <button
-                          key={option.size}
-                          className={`style-choice ${brushSize === option.size ? 'is-selected' : ''}`}
-                          type="button"
-                          aria-label={option.label}
-                          aria-pressed={brushSize === option.size}
-                          title={
-                            selectedStrokeCount > 0
-                              ? `Apply ${option.label.toLowerCase()} to selection`
-                              : `New strokes use ${option.label.toLowerCase()}`
-                          }
-                          onClick={() => applyBrushSize(option.size)}
-                        >
-                          <span
-                            aria-hidden="true"
-                            style={{
-                              display: 'block',
-                              width: Math.min(18, 4 + option.size),
-                              height: Math.min(18, 4 + option.size),
-                              borderRadius: '50%',
-                              background: 'currentColor',
-                            }}
-                          />
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="style-label-row">
-                      <span className="style-label">Pressure</span>
-                      <span className="style-value">
-                        {Math.round(brushThinning * 100)}
-                      </span>
-                    </div>
-                    <input
-                      className="opacity-input"
-                      type="range"
-                      min="0"
-                      max="100"
-                      step="5"
-                      value={Math.round(brushThinning * 100)}
-                      aria-label="Pressure sensitivity"
-                      onChange={(event) =>
-                        applyBrushThinning(Number(event.target.value) / 100)
-                      }
-                    />
-                  </div>
-                </div>
-                <div className="style-section">
-                  <div className="style-label-row">
-                    <span className="style-label">Opacity</span>
-                    <span className="style-value">{selectedOpacity}</span>
-                  </div>
-                  <input
-                    className="opacity-input"
-                    type="range"
-                    min="10"
-                    max="100"
-                    step="5"
-                    value={selectedOpacity}
-                    aria-label="Opacity"
-                    disabled={!selectedNode || locked}
-                    onChange={(event) =>
-                      updateSelectedNodes({
-                        opacity: Number(event.target.value) / 100,
-                      })
-                    }
-                  />
-                </div>
-                <div className="style-section">
-                  <span className="style-label">Layers</span>
-                  <div className="style-choice-row style-choice-row--wide">
-                    <button
-                      className="style-choice"
-                      type="button"
-                      aria-label="Bring forward"
-                      onClick={() => moveSelectedLayer('forward')}
-                    >
-                      <Layers2 size={16} />
-                    </button>
-                    <button
-                      className="style-choice"
-                      type="button"
-                      aria-label="Send backward"
-                      onClick={() => moveSelectedLayer('backward')}
-                    >
-                      <Layers2 size={16} />
-                    </button>
-                    <button
-                      className="style-choice"
-                      type="button"
-                      aria-label="Bring to front"
-                      onClick={() => moveSelectedLayer('front')}
-                    >
-                      <Layers2 size={16} />
-                    </button>
-                    <button
-                      className="style-choice"
-                      type="button"
-                      aria-label="Send to back"
-                      onClick={() => moveSelectedLayer('back')}
-                    >
-                      <Layers2 size={16} />
-                    </button>
-                  </div>
-                </div>
-              </fieldset>
-              <div className="style-panel-footer">
-                <span>Selected object</span>
-                <span>⌘ K</span>
-              </div>
-            </aside>
+            <StylePanel
+              locked={locked}
+              selectionCount={selectedIds.length}
+              selectedNode={selectedNode}
+              selectedId={selectedId}
+              selectedOpacity={selectedOpacity}
+              selectedFontSize={selectedFontSize}
+              selectedArrowRouting={selectedArrowRouting}
+              arrowRouting={arrowRouting}
+              selectedArrowCount={selectedArrowCount}
+              selectedStrokeCount={selectedStrokeCount}
+              brushSize={brushSize}
+              brushThinning={brushThinning}
+              onClose={() => setStylePanelOpen(false)}
+              onApplyColor={applySelectedColor}
+              onUpdateNodes={updateSelectedNodes}
+              onApplyArrowRouting={applyArrowRouting}
+              onApplyBrushSize={applyBrushSize}
+              onApplyBrushThinning={applyBrushThinning}
+              onApplyBulkOpacity={applyBulkOpacity}
+              onApplyFontSize={applyFontSize}
+              onMoveLayer={moveSelectedLayer}
+              onDeleteSelected={deleteSelected}
+              onDuplicateSelected={duplicateSelected}
+            />
           ) : (
             <button
               className="style-panel-reopen"
@@ -6102,6 +6058,7 @@ export function WhiteboardPage({
             <svg
               ref={canvasRef}
               className="board-canvas"
+              data-tool={activeTool}
               viewBox={`${viewBox.minX} ${viewBox.minY} ${viewBox.width} ${viewBox.height}`}
               role="application"
               aria-label="Architecture whiteboard. Drag empty space to select, drag shapes to move, double-click a shape to edit its label."
@@ -6199,163 +6156,72 @@ export function WhiteboardPage({
                     />
                   ))}
                 </g>
-                <g className="board-freehand-layer">
-                  {visibleStrokes.map((stroke) => {
-                    const isSelected = selectedIds.includes(stroke.id);
-                    // Pressure ink renders as a filled variable-width
-                    // outline; legacy centerline strokes keep the uniform
-                    // look. Computed once per stroke per render.
-                    const inkD = inkOutlinePath(stroke);
-                    const isOutline = inkD.endsWith('Z');
+                {layeredElements.map((element) =>
+                  element.kind === 'stroke' ? (
+                    <StrokeElement
+                      key={element.id}
+                      stroke={element.stroke}
+                      selected={selectedIds.includes(element.id)}
+                      interactiveCursor={activeTool === 'select'}
+                      onPointerDown={handleElementPointerDown}
+                    />
+                  ) : element.kind === 'arrow' ? (
+                    <ArrowElement
+                      key={element.id}
+                      arrow={element.arrow}
+                      selected={selectedIds.includes(element.id)}
+                      markerId={
+                        arrowMarkerIds.get(element.arrow.color) ?? 'arrowhead'
+                      }
+                      interactiveCursor={activeTool === 'select'}
+                      onPointerDown={handleElementPointerDown}
+                      onEndpointPointerDown={handleArrowEndpointPointerDown}
+                    />
+                  ) : (
+                    <CanvasNode
+                      key={element.id}
+                      node={element.node}
+                      selected={selectedIds.includes(element.id)}
+                      onPointerDown={(event) =>
+                        handleNodePointerDown(event, element.node)
+                      }
+                      onDoubleClick={() => handleNodeEdit(element.node.id)}
+                      onKeySelect={(event, target) =>
+                        handleNodeKeySelect(event, target)
+                      }
+                      onImageError={handleImageError}
+                    />
+                  ),
+                )}
+                {activePortSnap &&
+                  (() => {
+                    const snapNode = nodeById.get(activePortSnap.nodeId);
+                    if (!snapNode) return null;
                     return (
-                      <g
-                        key={stroke.id}
-                        className={`stroke-group ${isSelected ? 'is-selected' : ''}`}
-                        onPointerDown={(event) => {
-                          event.stopPropagation();
-                          handleElementPointerDown(event, stroke.id);
-                        }}
-                      >
-                        <path
-                          d={isOutline ? inkD : smoothPath(stroke.points)}
-                          fill={isOutline ? 'transparent' : 'none'}
-                          stroke="transparent"
-                          strokeWidth="18"
-                          style={{
-                            cursor:
-                              activeTool === 'select' ? 'pointer' : 'default',
-                          }}
-                        />
-                        {isOutline ? (
-                          <path
-                            d={inkD}
-                            fill={stroke.color}
-                            fillOpacity={stroke.opacity ?? 1}
-                            stroke="none"
-                          />
-                        ) : (
-                          <path
-                            d={smoothPath(stroke.points)}
-                            fill="none"
-                            stroke={stroke.color}
-                            strokeWidth="3"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          />
-                        )}
-                        {isSelected && (
-                          <path
-                            d={isOutline ? inkD : smoothPath(stroke.points)}
-                            fill="none"
+                      <g pointerEvents="none">
+                        {getNodePorts(snapNode).map((port) => (
+                          <circle
+                            key={port.id}
+                            cx={port.x}
+                            cy={port.y}
+                            r="4.5"
+                            fill="#ffffff"
                             stroke="#6965db"
-                            strokeWidth={isOutline ? 2 : 6}
-                            strokeDasharray="4 4"
-                            opacity="0.7"
+                            strokeWidth="2"
+                            opacity="0.9"
                           />
-                        )}
-                      </g>
-                    );
-                  })}
-                </g>
-                <g className="board-arrow-layer">
-                  {visibleArrows.map((arrow) => {
-                    const isSelected = selectedIds.includes(arrow.id);
-                    const markerId =
-                      arrowMarkerIds.get(arrow.color) ?? 'arrowhead';
-                    const routedD = arrowPath(arrow);
-                    return (
-                      <g
-                        key={arrow.id}
-                        className={`arrow-group ${isSelected ? 'is-selected' : ''}`}
-                        onPointerDown={(event) => {
-                          event.stopPropagation();
-                          handleElementPointerDown(event, arrow.id);
-                        }}
-                      >
-                        <path
-                          d={routedD}
+                        ))}
+                        <circle
+                          cx={activePortSnap.x}
+                          cy={activePortSnap.y}
+                          r="8"
                           fill="none"
-                          stroke="transparent"
-                          strokeWidth="18"
-                          style={{
-                            cursor:
-                              activeTool === 'select' ? 'pointer' : 'default',
-                          }}
-                        />
-                        <path
-                          d={routedD}
-                          fill="none"
-                          stroke={arrow.color}
+                          stroke="#6965db"
                           strokeWidth="2.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          markerEnd={`url(#${markerId})`}
                         />
-                        {isSelected && (
-                          <>
-                            <path
-                              d={routedD}
-                              fill="none"
-                              stroke="#6965db"
-                              strokeWidth="5"
-                              strokeDasharray="4 4"
-                              opacity="0.6"
-                            />
-                            <circle
-                              cx={arrow.start.x}
-                              cy={arrow.start.y}
-                              r="6"
-                              fill="#ffffff"
-                              stroke="#6965db"
-                              strokeWidth="2.5"
-                              style={{ cursor: 'move' }}
-                              onPointerDown={(event) => {
-                                event.stopPropagation();
-                                handleArrowEndpointPointerDown(
-                                  event,
-                                  arrow.id,
-                                  'start',
-                                );
-                              }}
-                            />
-                            <circle
-                              cx={arrow.end.x}
-                              cy={arrow.end.y}
-                              r="6"
-                              fill="#ffffff"
-                              stroke="#6965db"
-                              strokeWidth="2.5"
-                              style={{ cursor: 'move' }}
-                              onPointerDown={(event) => {
-                                event.stopPropagation();
-                                handleArrowEndpointPointerDown(
-                                  event,
-                                  arrow.id,
-                                  'end',
-                                );
-                              }}
-                            />
-                          </>
-                        )}
                       </g>
                     );
-                  })}
-                </g>
-                {visibleNodes.map((node) => (
-                  <CanvasNode
-                    key={node.id}
-                    node={node}
-                    selected={selectedIds.includes(node.id)}
-                    onPointerDown={(event) =>
-                      handleNodePointerDown(event, node)
-                    }
-                    onDoubleClick={() => handleNodeEdit(node.id)}
-                    onKeySelect={(event, target) =>
-                      handleNodeKeySelect(event, target)
-                    }
-                    onImageError={handleImageError}
-                  />
-                ))}
+                  })()}
               </g>
               <g className="canvas-interactive" data-interactive>
                 {selectedNodeBounds && !locked && (
@@ -6471,6 +6337,50 @@ export function WhiteboardPage({
                           stroke={createPreview.color}
                           strokeWidth="2"
                           strokeDasharray="6 4"
+                          opacity="0.6"
+                        />
+                      );
+                    }
+                    if (createPreview.tool === 'diamond') {
+                      const cx = px + pw / 2;
+                      const cy = py + ph / 2;
+                      return (
+                        <polygon
+                          points={`${cx},${py} ${px + pw},${cy} ${cx},${py + ph} ${px},${cy}`}
+                          fill="none"
+                          stroke={createPreview.color}
+                          strokeWidth="2"
+                          strokeDasharray="6 4"
+                          opacity="0.6"
+                        />
+                      );
+                    }
+                    if (createPreview.tool === 'line') {
+                      return (
+                        <line
+                          x1={createPreview.start.x}
+                          y1={(createPreview.start.y + createPreview.end.y) / 2}
+                          x2={createPreview.end.x}
+                          y2={(createPreview.start.y + createPreview.end.y) / 2}
+                          stroke={createPreview.color}
+                          strokeWidth="3"
+                          strokeDasharray="6 4"
+                          strokeLinecap="round"
+                          opacity="0.6"
+                        />
+                      );
+                    }
+                    if (createPreview.tool === 'arrow') {
+                      return (
+                        <line
+                          x1={createPreview.start.x}
+                          y1={createPreview.start.y}
+                          x2={createPreview.end.x}
+                          y2={createPreview.end.y}
+                          stroke={createPreview.color}
+                          strokeWidth="2.5"
+                          strokeDasharray="6 4"
+                          strokeLinecap="round"
                           opacity="0.6"
                         />
                       );
@@ -6628,128 +6538,25 @@ export function WhiteboardPage({
         </section>
 
         {showCode && (
-          <aside className="code-panel" aria-label="D2 code editor">
-            <div className="code-panel-header">
-              <div className="code-panel-heading">
-                <div className="code-icon">
-                  <Code2 size={16} />
-                </div>
-                <div>
-                  <span className="code-panel-title">D2 source</span>
-                  <span className="code-panel-subtitle">
-                    native diagram layer
-                  </span>
-                </div>
-              </div>
-              <button
-                className="code-close"
-                type="button"
-                aria-label="Close D2 editor"
-                title="Close D2 editor"
-                onClick={() => setShowCode(false)}
-              >
-                <PanelRight size={16} />
-              </button>
-            </div>
-            <div className="code-panel-status">
-              <span
-                className={`code-status-dot code-status-dot--${compileState}`}
-              />
-              <span>
-                {compileState === 'draft'
-                  ? 'Draft changes'
-                  : compileState === 'compiling'
-                    ? 'Compiling…'
-                    : compileState === 'compiled'
-                      ? 'Compiled successfully'
-                      : 'Ready to compile'}
-              </span>
-              <span className="code-line-count">
-                {code.split('\n').length} lines
-              </span>
-            </div>
-            <form
-              className="code-ai-row"
-              style={{ display: 'flex', gap: 8, padding: '8px 12px' }}
-              onSubmit={(event) => {
-                event.preventDefault();
-                void generateWithAi();
-              }}
-            >
-              <div style={{ position: 'relative', flex: 1 }}>
-                <Sparkles
-                  size={14}
-                  style={{
-                    position: 'absolute',
-                    left: 10,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    opacity: 0.55,
-                    pointerEvents: 'none',
-                  }}
-                />
-                <input
-                  aria-label="Describe a diagram to generate"
-                  placeholder="Describe a diagram… (AI)"
-                  value={aiPrompt}
-                  maxLength={4000}
-                  disabled={aiBusy}
-                  onChange={(event) => setAiPrompt(event.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '8px 10px 8px 30px',
-                    borderRadius: 10,
-                    border: '1px solid #e3e2ea',
-                    fontSize: 13,
-                  }}
-                />
-              </div>
-              <button
-                type="submit"
-                className="compile-button"
-                disabled={aiBusy || !aiPrompt.trim()}
-                title={
-                  aiQuota
-                    ? `AI quota: ${aiQuota.used}/${aiQuota.limit} this month`
-                    : 'Generate D2 from description'
-                }
-              >
-                {aiBusy ? 'Dreaming…' : 'Generate'}
-              </button>
-            </form>
-            <div className="code-editor-wrap">
-              <D2Editor value={code} onChange={handleCodeChange} />
-            </div>
-            <div className="code-panel-footer">
-              <div className="code-footer-copy">
-                <span className="code-key">⌘</span>
-                <span>Changes compile after a short pause</span>
-              </div>
-              <label className="engine-picker">
-                <span className="engine-picker-label">Layout</span>
-                <select
-                  aria-label="Layout engine"
-                  value={engine}
-                  onChange={(event) =>
-                    selectEngine(event.target.value as 'dagre' | 'elk' | 'tala')
-                  }
-                >
-                  <option value="dagre">Dagre</option>
-                  <option value="elk">ELK (Pro)</option>
-                  <option value="tala">Tala (Pro)</option>
-                </select>
-              </label>
-              <button
-                className="compile-button"
-                type="button"
-                onClick={compileCode}
-                disabled={compileState === 'compiling'}
-              >
-                <span className="compile-button__dot" />
-                Compile
-              </button>
-            </div>
-          </aside>
+          <D2Panel
+            code={code}
+            onCodeChange={handleCodeChange}
+            compileState={compileState}
+            engine={engine}
+            onSelectEngine={selectEngine}
+            onCompile={() => void compileCode()}
+            onClose={() => setShowCode(false)}
+            diagnostics={d2Diagnostics}
+            aiPrompt={aiPrompt}
+            onAiPromptChange={setAiPrompt}
+            aiBusy={aiBusy}
+            aiQuota={aiQuota}
+            jevWarnings={jevWarnings}
+            onGenerate={() => void generateWithAi()}
+            aiModels={aiModels}
+            aiModel={aiModel}
+            onSelectModel={selectAiModel}
+          />
         )}
       </main>
       {showRoomSettings && roomMeta && roomId ? (
