@@ -28,6 +28,13 @@ const envSchema = z.object({
   AI_API_BASE_URL: z.string().url().optional(),
   AI_MODEL: z.string().optional(),
   AI_MODELS: z.string().optional(),
+  JEV_API_KEY: z.string().optional(),
+  JEV_API_BASE_URL: z.string().url().optional(),
+  JEV_MODEL: z.string().optional(),
+  JEV_TIMEOUT_MS: z.coerce.number().int().positive().default(1500),
+  JEV_FAIL_OPEN: z.enum(["true", "false", "1", "0"]).optional(),
+  JEV_JAILBREAK_THRESHOLD: z.coerce.number().min(0).max(1).default(0.85),
+  JEV_MIN_INTENT: z.coerce.number().min(0).max(1).default(0.25),
   OIDC_ISSUER: z.string().url().optional(),
   OIDC_CLIENT_ID: z.string().optional(),
   OIDC_CLIENT_SECRET: z.string().optional(),
@@ -71,6 +78,14 @@ export type Config = {
   aiModel?: string;
   /** Optional comma-separated allowlist advertising picker models. */
   aiModels?: string[];
+  jevApiKey?: string;
+  jevApiBaseUrl?: string;
+  jevModel?: string;
+  jevTimeoutMs?: number;
+  /** Fail open (skip guardrails) when Jev is unreachable. Defaults to true outside production. */
+  jevFailOpen?: boolean;
+  jevJailbreakThreshold?: number;
+  jevMinIntent?: number;
   oidcIssuer?: string;
   oidcClientId?: string;
   oidcClientSecret?: string;
@@ -174,6 +189,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
           .map((m) => m.trim())
           .filter((m) => m.length > 0)
       : undefined,
+    jevApiKey: parsed.JEV_API_KEY,
+    jevApiBaseUrl: parsed.JEV_API_BASE_URL,
+    jevModel: parsed.JEV_MODEL,
+    jevTimeoutMs: parsed.JEV_TIMEOUT_MS,
+    jevFailOpen:
+      parsed.JEV_FAIL_OPEN === undefined
+        ? undefined
+        : parsed.JEV_FAIL_OPEN === "true" || parsed.JEV_FAIL_OPEN === "1",
+    jevJailbreakThreshold: parsed.JEV_JAILBREAK_THRESHOLD,
+    jevMinIntent: parsed.JEV_MIN_INTENT,
     oidcIssuer: parsed.OIDC_ISSUER,
     oidcClientId: parsed.OIDC_CLIENT_ID,
     oidcClientSecret: parsed.OIDC_CLIENT_SECRET,

@@ -4,6 +4,7 @@ export type AiModelsResponse = {
   models: string[];
   default: string;
   configured: boolean;
+  jevConfigured?: boolean;
 };
 
 /** Curated fallback when the server list is unreachable (offline rooms). */
@@ -43,6 +44,7 @@ export async function fetchAiModels(): Promise<AiModelsResponse> {
     models: [...FALLBACK_AI_MODELS],
     default: FALLBACK_AI_MODELS[0],
     configured: false,
+    jevConfigured: false,
   };
   const baseUrl = resolveSyncHttpUrl();
   if (!baseUrl) return fallback;
@@ -65,6 +67,7 @@ export async function fetchAiModels(): Promise<AiModelsResponse> {
       models,
       default: fallbackDefault,
       configured: body.configured === true,
+      jevConfigured: body.jevConfigured === true,
     };
   } catch {
     return fallback;

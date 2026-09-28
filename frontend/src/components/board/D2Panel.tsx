@@ -17,6 +17,7 @@ type D2PanelProps = {
   onAiPromptChange: (value: string) => void;
   aiBusy: boolean;
   aiQuota: { used: number; limit: number } | null;
+  jevWarnings?: string[];
   onGenerate: () => void;
   aiModels: string[];
   aiModel: string;
@@ -40,6 +41,7 @@ export function D2Panel({
   onAiPromptChange,
   aiBusy,
   aiQuota,
+  jevWarnings = [],
   onGenerate,
   aiModels,
   aiModel,
@@ -178,6 +180,25 @@ export function D2Panel({
           {aiBusy ? 'Dreaming…' : 'Generate'}
         </button>
       </form>
+      {jevWarnings.length > 0 ? (
+        <div
+          role="status"
+          aria-label="AI quality warnings"
+          style={{
+            margin: '0 12px',
+            padding: '6px 10px',
+            borderRadius: 8,
+            background: '#fff8e6',
+            border: '1px solid #f0d48a',
+            fontSize: 12,
+            color: '#7a5b00',
+          }}
+        >
+          {jevWarnings.map((warning) => (
+            <div key={warning}>{warning}</div>
+          ))}
+        </div>
+      ) : null}
       <div className="code-editor-wrap">
         <D2Editor
           value={code}

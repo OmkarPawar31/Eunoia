@@ -64,6 +64,7 @@ export class Metrics {
   private readonly http = new Map<string, number>();
   private readonly compiles = new Map<string, number>();
   private readonly aiGenerations = new Map<string, number>();
+  private readonly jevEvaluations = new Map<string, number>();
   private readonly wsUpgrades = new Map<string, number>();
 
   incHttp(method: string, pathname: string, status: HttpStatus): void {
@@ -78,6 +79,10 @@ export class Metrics {
 
   incAi(outcome: string): void {
     this.aiGenerations.set(outcome, (this.aiGenerations.get(outcome) ?? 0) + 1);
+  }
+
+  incJev(outcome: string): void {
+    this.jevEvaluations.set(outcome, (this.jevEvaluations.get(outcome) ?? 0) + 1);
   }
 
   incWsUpgrade(outcome: string): void {
@@ -116,6 +121,13 @@ export class Metrics {
     );
     for (const [outcome, count] of [...this.aiGenerations.entries()].sort()) {
       lines.push(`eunoia_ai_generations_total{outcome="${outcome}"} ${count}`);
+    }
+    lines.push(
+      '# HELP eunoia_jev_evaluations_total Jev guardrail/QA evaluations by outcome.',
+      '# TYPE eunoia_jev_evaluations_total counter',
+    );
+    for (const [outcome, count] of [...this.jevEvaluations.entries()].sort()) {
+      lines.push(`eunoia_jev_evaluations_total{outcome="${outcome}"} ${count}`);
     }
     lines.push(
       '# HELP eunoia_ws_upgrades_total WebSocket upgrade attempts by outcome.',

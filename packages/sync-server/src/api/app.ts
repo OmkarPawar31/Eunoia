@@ -13,8 +13,18 @@ import {
   type DependencyCheck,
   type HealthChecks,
   imageStorageCheck,
+  jevCheck,
   summarizeReadiness,
 } from "../health.js";
+import {
+  decidePreGate,
+  evaluatePostQa,
+  evaluatePreGate,
+  isJevConfigured,
+  JevError,
+  resolveFailOpen,
+  type JevVerdict,
+} from "../jev.js";
 import {
   buildImageKey,
   isR2NotFound,
@@ -502,7 +512,7 @@ export function createApiApp(
       .get("/readyz", async ({ set }) => {
         // Readiness for orchestrators and external probers: every check is
         // bounded and never throws, so this endpoint always answers.
-        const [database, redis, compiler] = await Promise.all([
+        const [database, redis, compiler, jev] = await Promise.all([
           health.checkDatabase().catch(
             (): DependencyCheck => ({ status: "error", detail: "check failed" }),
           ),
@@ -510,6 +520,12 @@ export function createApiApp(
             (): DependencyCheck => ({ status: "error", detail: "check failed" }),
           ),
           health.checkCompiler().catch(
+            (): DependencyCheck => ({ status: "error", detail: "check failed" }),
+          ),
+          (health.checkJev
+            ? health.checkJev()
+            : Promise.resolve(jevCheck(config))
+          ).catch(
             (): DependencyCheck => ({ status: "error", detail: "check failed" }),
           ),
         ]);
@@ -520,6 +536,7 @@ export function createApiApp(
           imageStorageCheck(config),
           version,
           (Date.now() - startedAt) / 1000,
+          jev,
         );
         // A down database takes the server out of rotation; degraded deps
         // (Redis, compiler) stay routable by design.
@@ -1056,6 +1073,7 @@ export function createApiApp(
           models,
           default: defaultModel,
           configured: config.aiApiKey !== undefined,
+          jevConfigured: isJevConfigured(config),
         };
       })
       .post("/api/ai/generate", async ({ body, headers, query, set }) => {
@@ -1118,16 +1136,103 @@ export function createApiApp(
             code: "QUOTA_EXHAUSTED",
           };
         }
+        // Jev pre-generation gate: block jailbreaks/spam before spending the
+        // chat-LLM call or quota. Advisory complexity warnings flow through.
+        let preWarnings: string[] = [];
+        if (isJevConfigured(config)) {
+          try {
+            const gate = await evaluatePreGate(parsed.data.prompt, config);
+            const decision = decidePreGate(
+              gate,
+              config,
+              config.d2CommunityNodeLimit,
+            );
+            if (!decision.allowed) {
+              metrics.incJev(
+                decision.code === "JEV_BLOCKED" ? "blocked" : "low_intent",
+              );
+              await recordAudit(deps.audit, {
+                actorId: caller.id,
+                workspaceId: null,
+                action: "ai.jev_blocked",
+                target: parsed.data.roomId ?? null,
+              });
+              set.status = 400;
+              return { error: decision.error, code: decision.code };
+            }
+            preWarnings = decision.warnings;
+            metrics.incJev("pregate_pass");
+          } catch (error) {
+            if (error instanceof JevError) {
+              metrics.incJev("skipped");
+              if (!resolveFailOpen(config)) {
+                set.status = 503;
+                return {
+                  error: "AI guardrails are temporarily unavailable",
+                  code: "JEV_UNAVAILABLE",
+                };
+              }
+            } else {
+              throw error;
+            }
+          }
+        }
         try {
           const result = await generateD2(
             parsed.data.prompt,
             config,
             parsed.data.model,
           );
+          // Jev post-generation QA: advisory only — compile is truth. Never
+          // blocks; warnings surface in the editor.
+          let jev: JevVerdict | undefined;
+          if (isJevConfigured(config)) {
+            try {
+              const qa = await evaluatePostQa(
+                parsed.data.prompt,
+                result.d2,
+                config,
+              );
+              metrics.incJev("success");
+              jev = {
+                matchesIntent: qa.matchesIntent,
+                likelyValid: qa.likelyValid,
+                confidence: qa.matchesConfidence,
+                warnings: [...preWarnings, ...qa.warnings],
+              };
+            } catch {
+              metrics.incJev("qa_skipped");
+              if (preWarnings.length > 0) {
+                jev = {
+                  matchesIntent: 2,
+                  likelyValid: 1,
+                  confidence: 0,
+                  warnings: preWarnings,
+                };
+              }
+            }
+          } else if (preWarnings.length > 0) {
+            jev = {
+              matchesIntent: 2,
+              likelyValid: 1,
+              confidence: 0,
+              warnings: preWarnings,
+            };
+          }
           // Count only successful generations against the quota.
           await aiUsage.incrementUsage(caller.id, currentMonth());
           metrics.incAi("success");
-          return { ...result, quota: { used: used + 1, limit: quota } };
+          await recordAudit(deps.audit, {
+            actorId: caller.id,
+            workspaceId: null,
+            action: "ai.generated",
+            target: parsed.data.roomId ?? null,
+          });
+          return {
+            ...result,
+            quota: { used: used + 1, limit: quota },
+            ...(jev ? { jev } : {}),
+          };
         } catch (error) {
           metrics.incAi("error");
           const message =

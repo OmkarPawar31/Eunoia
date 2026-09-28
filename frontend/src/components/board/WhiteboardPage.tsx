@@ -1139,6 +1139,7 @@ export function WhiteboardPage({
     used: number;
     limit: number;
   } | null>(null);
+  const [jevWarnings, setJevWarnings] = useState<string[]>([]);
   const [aiModels, setAiModels] = useState<string[]>([...FALLBACK_AI_MODELS]);
   const [aiModel, setAiModel] = useState<string>(
     () =>
@@ -4763,6 +4764,7 @@ export function WhiteboardPage({
     if (locked) return;
     setAiBusy(true);
     setBoardError(null);
+    setJevWarnings([]);
     try {
       const { generateDiagram } = await import('@/lib/whiteboard/ai-api');
       const result = await generateDiagram(prompt, {
@@ -4772,6 +4774,7 @@ export function WhiteboardPage({
         model: aiModelRef.current,
       });
       setAiQuota(result.quota);
+      setJevWarnings(result.jev?.warnings ?? []);
       setAiPrompt('');
       handleCodeChange(result.d2);
     } catch (error) {
@@ -4783,6 +4786,24 @@ export function WhiteboardPage({
       ) {
         setBoardError(
           'AI generation is not configured on this server. Set AI_API_KEY to enable it.',
+        );
+      } else if (error instanceof ApiError && error.code === 'JEV_BLOCKED') {
+        setBoardError(
+          'Prompt blocked by AI guardrails (suspected prompt injection). Rephrase as a diagram description.',
+        );
+      } else if (
+        error instanceof ApiError &&
+        error.code === 'JEV_LOW_INTENT'
+      ) {
+        setBoardError(
+          'That does not look like a diagram request. Describe nodes and connections.',
+        );
+      } else if (
+        error instanceof ApiError &&
+        error.code === 'JEV_UNAVAILABLE'
+      ) {
+        setBoardError(
+          'AI guardrails are temporarily unavailable. Try again shortly.',
         );
       } else {
         setBoardError(
@@ -6530,6 +6551,7 @@ export function WhiteboardPage({
             onAiPromptChange={setAiPrompt}
             aiBusy={aiBusy}
             aiQuota={aiQuota}
+            jevWarnings={jevWarnings}
             onGenerate={() => void generateWithAi()}
             aiModels={aiModels}
             aiModel={aiModel}

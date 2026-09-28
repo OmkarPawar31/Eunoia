@@ -21,6 +21,7 @@ export type Readiness = {
     redis: DependencyCheck;
     compiler: DependencyCheck;
     imageStorage: DependencyCheck;
+    jev: DependencyCheck;
   };
 };
 
@@ -28,6 +29,7 @@ export type HealthChecks = {
   checkDatabase: () => Promise<DependencyCheck>;
   checkRedis: () => Promise<DependencyCheck>;
   checkCompiler: () => Promise<DependencyCheck>;
+  checkJev?: () => Promise<DependencyCheck>;
 };
 
 const CHECK_TIMEOUT_MS = 2500;
@@ -138,6 +140,7 @@ export function defaultHealthChecks(
         };
       }
     },
+    checkJev: async () => jevCheck(config),
   };
 }
 
@@ -148,6 +151,17 @@ export function imageStorageCheck(config: Config): DependencyCheck {
     : { status: 'skipped', detail: 'R2 not configured; image endpoints 503' };
 }
 
+/**
+ * Jev needs no network probe: a live probe would spend budget on every
+ * /readyz poll. Presence of the key decides the check; failures at request
+ * time only ever degrade (fail-open) or 503 the AI route (fail-closed).
+ */
+export function jevCheck(config: Config): DependencyCheck {
+  return config.jevApiKey
+    ? { status: 'ok', detail: 'Jev guardrails enabled' }
+    : { status: 'skipped', detail: 'JEV_API_KEY unset; guardrails skipped' };
+}
+
 export function summarizeReadiness(
   database: DependencyCheck,
   redis: DependencyCheck,
@@ -155,6 +169,7 @@ export function summarizeReadiness(
   imageStorage: DependencyCheck,
   version: string,
   uptimeSec: number,
+  jev: DependencyCheck = { status: 'skipped' as const },
 ): Readiness {
   // Persistence is load-bearing: without it every room is ephemeral, so a
   // configured-but-unreachable database takes the server out of rotation.
@@ -171,6 +186,6 @@ export function summarizeReadiness(
     status,
     version,
     uptimeSec: Math.floor(uptimeSec),
-    checks: { database, redis, compiler, imageStorage },
+    checks: { database, redis, compiler, imageStorage, jev },
   };
 }
