@@ -1,14 +1,13 @@
 import { node } from '@elysiajs/node';
 import { Elysia } from 'elysia';
+import type { Logger } from 'pino';
 import {
   AI_QUOTA,
   type AiUsageStore,
   currentMonth,
   generateD2,
   listAiModels,
-  type AiUsageStore,
 } from "../ai.js";
-} from '../ai.js';
 import { type AuditStore, recordAudit } from '../audit.js';
 import type { BillingDeps } from '../billing.js';
 import type { Config } from '../config.js';
@@ -21,21 +20,22 @@ import {
   summarizeReadiness,
 } from '../health.js';
 import {
-  decidePreGate,
-  evaluatePostQa,
-  evaluatePreGate,
-  isJevConfigured,
-  JevError,
-  resolveFailOpen,
-  type JevVerdict,
-} from "../jev.js";
-import {
   buildImageKey,
   type ImageDeps,
   isR2NotFound,
   keyBelongsToRoom,
   type ObjectHead,
 } from '../images.js';
+import {
+  decidePreGate,
+  evaluatePostQa,
+  evaluatePreGate,
+  isJevConfigured,
+  JevError,
+  type JevVerdict,
+  resolveFailOpen,
+  resolveJevTimeout,
+} from "../jev.js";
 import { Metrics } from '../metrics.js';
 import type { RoomMetadata } from '../RoomLoader.js';
 import type { RoomManager } from '../RoomManager.js';
@@ -77,6 +77,7 @@ import {
   ImageListQuerySchema,
   ImageRequestUploadSchema,
   InviteMemberSchema,
+  JevVerdictSchema,
   LoginUserSchema,
   MoveRoomSchema,
   RegisterUserSchema,
@@ -319,6 +320,8 @@ export type ApiDeps = {
   aiUsage?: AiUsageStore;
   /** Audit event sink. Auditing is skipped without it (dev default). */
   audit?: AuditStore;
+  /** Optional structured logger for advisory warnings (Jev skips, etc.). */
+  log?: Pick<Logger, 'warn'>;
 };
 
 /** Post-auth landing path: same rules as the frontend AuthForm. */
@@ -404,6 +407,23 @@ const skippedCheck = async (): Promise<DependencyCheck> => ({
   status: 'skipped',
 });
 
+/**
+ * Advisory Jev verdicts never break a successful generation: validate at
+ * the boundary and drop (with a warn) rather than serve malformed data.
+ */
+function toJevField(
+  verdict: JevVerdict | undefined,
+  log: Pick<Logger, 'warn'> | undefined,
+): { jev?: JevVerdict } {
+  if (!verdict) return {};
+  const parsed = JevVerdictSchema.safeParse(verdict);
+  if (!parsed.success) {
+    log?.warn({ verdict }, 'dropping malformed Jev verdict');
+    return {};
+  }
+  return { jev: parsed.data };
+}
+
 export function createApiApp(
   manager: RoomManager,
   config: Config,
@@ -421,6 +441,7 @@ export function createApiApp(
   };
   const metrics = deps.metrics ?? new Metrics();
   const startedAt = deps.startedAt ?? Date.now();
+  const log = deps.log;
   const version = deps.version ?? appVersion();
   const getStats =
     deps.getStats ??
@@ -512,7 +533,7 @@ export function createApiApp(
       .get('/readyz', async ({ set }) => {
         // Readiness for orchestrators and external probers: every check is
         // bounded and never throws, so this endpoint always answers.
-        const [database, redis, compiler, imageStorage] = await Promise.all([
+        const [database, redis, compiler, jev] = await Promise.all([
           health.checkDatabase().catch(
             (): DependencyCheck => ({
               status: 'error',
@@ -531,18 +552,21 @@ export function createApiApp(
               detail: 'check failed',
             }),
           ),
-          (health.checkImageStorage?.().catch(
+          (health.checkJev
+            ? health.checkJev()
+            : Promise.resolve(jevCheck(config))
+          ).catch(
             (): DependencyCheck => ({
               status: 'error',
               detail: 'check failed',
             }),
-          ) ?? Promise.resolve(imageStorageCheck(config))),
+          ),
         ]);
         const readiness = summarizeReadiness(
           database,
           redis,
           compiler,
-          imageStorage,
+          imageStorageCheck(config),
           version,
           (Date.now() - startedAt) / 1000,
           jev,
@@ -1074,6 +1098,17 @@ export function createApiApp(
           };
         }
       })
+      .get('/api/ai/models', () => {
+        // Public (no auth): advertises picker choices + server default.
+        // Generation itself still requires auth + quota at POST.
+        const { models, default: defaultModel } = listAiModels(config);
+        return {
+          models,
+          default: defaultModel,
+          configured: config.aiApiKey !== undefined,
+          jevConfigured: isJevConfigured(config),
+        };
+      })
       .post('/api/ai/generate', async ({ body, headers, query, set }) => {
         if (!config.aiApiKey) {
           set.status = 503;
@@ -1137,7 +1172,10 @@ export function createApiApp(
         // Jev pre-generation gate: block jailbreaks/spam before spending the
         // chat-LLM call or quota. Advisory complexity warnings flow through.
         let preWarnings: string[] = [];
+        let jevUsable = false;
+        let preGateElapsedMs = 0;
         if (isJevConfigured(config)) {
+          const preGateStart = Date.now();
           try {
             const gate = await evaluatePreGate(parsed.data.prompt, config);
             const decision = decidePreGate(
@@ -1159,10 +1197,15 @@ export function createApiApp(
               return { error: decision.error, code: decision.code };
             }
             preWarnings = decision.warnings;
+            jevUsable = true;
             metrics.incJev("pregate_pass");
           } catch (error) {
             if (error instanceof JevError) {
               metrics.incJev("skipped");
+              log?.warn(
+                { err: error instanceof Error ? error.message : error },
+                'jev pre-gate skipped; continuing fail-open',
+              );
               if (!resolveFailOpen(config)) {
                 set.status = 503;
                 return {
@@ -1173,6 +1216,8 @@ export function createApiApp(
             } else {
               throw error;
             }
+          } finally {
+            preGateElapsedMs = Date.now() - preGateStart;
           }
         }
         try {
@@ -1182,9 +1227,20 @@ export function createApiApp(
             parsed.data.model,
           );
           // Jev post-generation QA: advisory only — compile is truth. Never
-          // blocks; warnings surface in the editor.
+          // blocks; warnings surface in the editor. Skipped when the
+          // pre-gate already failed (the provider is down, so retrying
+          // would only add latency) or ran long (bounds total Jev time to
+          // roughly two single-attempt budgets).
           let jev: JevVerdict | undefined;
-          if (isJevConfigured(config)) {
+          if (!jevUsable) {
+            // Pre-gate "skipped" is already counted; QA never ran.
+          } else if (preGateElapsedMs > resolveJevTimeout(config)) {
+            metrics.incJev("qa_skipped");
+            log?.warn(
+              { preGateElapsedMs },
+              'jev post-QA skipped after a slow pre-gate',
+            );
+          } else {
             try {
               const qa = await evaluatePostQa(
                 parsed.data.prompt,
@@ -1198,18 +1254,16 @@ export function createApiApp(
                 confidence: qa.matchesConfidence,
                 warnings: [...preWarnings, ...qa.warnings],
               };
-            } catch {
+            } catch (error) {
+              if (!(error instanceof JevError)) throw error;
               metrics.incJev("qa_skipped");
-              if (preWarnings.length > 0) {
-                jev = {
-                  matchesIntent: 2,
-                  likelyValid: 1,
-                  confidence: 0,
-                  warnings: preWarnings,
-                };
-              }
+              log?.warn(
+                { err: error instanceof Error ? error.message : error },
+                'jev post-QA skipped',
+              );
             }
-          } else if (preWarnings.length > 0) {
+          }
+          if (!jev && preWarnings.length > 0) {
             jev = {
               matchesIntent: 2,
               likelyValid: 1,
@@ -1229,7 +1283,7 @@ export function createApiApp(
           return {
             ...result,
             quota: { used: used + 1, limit: quota },
-            ...(jev ? { jev } : {}),
+            ...toJevField(jev, log),
           };
         } catch (error) {
           metrics.incAi('error');

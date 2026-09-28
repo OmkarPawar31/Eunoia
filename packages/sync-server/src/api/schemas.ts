@@ -17,7 +17,8 @@ export const GenerateDiagramSchema = z
 
 export const JevVerdictSchema = z
   .object({
-    matchesIntent: z.number().min(0).max(3),
+    // matches_intent is a 3-level score (0 unrelated, 1 partial, 2 faithful).
+    matchesIntent: z.number().min(0).max(2),
     likelyValid: z.number().min(0).max(1),
     confidence: z.number().min(0).max(1),
     warnings: z.array(z.string().max(500)),

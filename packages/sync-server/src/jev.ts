@@ -16,36 +16,35 @@ export const DEFAULT_JEV_BASE_URL = "https://api.typesafe.ai/v1";
 export const DEFAULT_JEV_TIMEOUT_MS = 1500;
 export const DEFAULT_JEV_JAILBREAK_THRESHOLD = 0.85;
 export const DEFAULT_JEV_MIN_INTENT = 0.25;
-
+ 
 /** Truncation budgets: keep Jev input costs bounded, never send secrets. */
 export const MAX_JEV_PROMPT_CHARS = 4000;
 export const MAX_JEV_D2_CHARS = 8000;
 
-const NoulAnswerSchema = z
-  .object({
-    type: z.literal("noul"),
-    noul: z.number().min(0).max(1),
-  })
-  .strict();
+/**
+ * Jev answer payloads. Unknown keys are stripped (not rejected): the
+ * provider may add fields over time and that must never disable
+ * guardrails (fail-open) or 503 AI generation (fail-closed).
+ */
+const NoulAnswerSchema = z.object({
+  type: z.literal("noul"),
+  noul: z.number().min(0).max(1),
+});
 
-const ChoiceAnswerSchema = z
-  .object({
-    type: z.literal("choice"),
-    choice: z.string(),
-    probabilities: z.record(z.string(), z.number()),
-    confidence: z.number().min(0).max(1),
-  })
-  .strict();
+const ChoiceAnswerSchema = z.object({
+  type: z.literal("choice"),
+  choice: z.string(),
+  probabilities: z.record(z.string(), z.number()),
+  confidence: z.number().min(0).max(1),
+});
 
-const ScoreAnswerSchema = z
-  .object({
-    type: z.literal("score"),
-    score: z.number(),
-    legend: z.record(z.string(), z.string()),
-    probabilities: z.record(z.string(), z.number()),
-    confidence: z.number().min(0).max(1),
-  })
-  .strict();
+const ScoreAnswerSchema = z.object({
+  type: z.literal("score"),
+  score: z.number(),
+  legend: z.record(z.string(), z.string()),
+  probabilities: z.record(z.string(), z.number()),
+  confidence: z.number().min(0).max(1),
+});
 
 const JevAnswerSchema = z.union([
   NoulAnswerSchema,
@@ -53,19 +52,16 @@ const JevAnswerSchema = z.union([
   ScoreAnswerSchema,
 ]);
 
-const JevResponseSchema = z
-  .object({
-    model: z.string(),
-    answers: z.record(z.string(), JevAnswerSchema),
-    usage: z
-      .object({
-        input_tokens: z.number().int().nonnegative(),
-        output_tokens: z.number().int().nonnegative(),
-      })
-      .strict()
-      .optional(),
-  })
-  .strict();
+const JevResponseSchema = z.object({
+  model: z.string(),
+  answers: z.record(z.string(), JevAnswerSchema),
+  usage: z
+    .object({
+      input_tokens: z.number().int().nonnegative(),
+      output_tokens: z.number().int().nonnegative(),
+    })
+    .optional(),
+});
 
 export type JevResponse = z.infer<typeof JevResponseSchema>;
 
@@ -98,6 +94,11 @@ function resolveTimeout(config: Config): number {
   return config.jevTimeoutMs ?? DEFAULT_JEV_TIMEOUT_MS;
 }
 
+/** Single-attempt budget, exposed so callers can bound total Jev latency. */
+export function resolveJevTimeout(config: Config): number {
+  return resolveTimeout(config);
+}
+
 function resolveModel(config: Config): string {
   const model = config.jevModel?.trim();
   return model && model.length > 0 ? model : DEFAULT_JEV_MODEL;
@@ -122,11 +123,64 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Process-wide Jev health flag backing /readyz. Set by `evaluateJev` (only
+ * when Jev is configured — an unset key is "skipped", not unhealthy) and
+ * cleared by the next success. Sticky until success so a single failed
+ * generation marks the guardrail degraded instead of silently fail-open.
+ */
+let lastJevOk: boolean | null = null;
+
+export function recordJevOutcome(ok: boolean): void {
+  lastJevOk = ok;
+}
+
+/** Last configured Jev round-trip outcome: true/false, or null if none yet. */
+export function jevLastOutcome(): boolean | null {
+  return lastJevOk;
+}
+
+/** Test-only reset for the process-wide Jev health flag. */
+export function resetJevHealth(): void {
+  lastJevOk = null;
+}
+
+/** Transient provider statuses worth one more attempt (after draining). */
+const RETRYABLE_STATUS = new Set([429, 502, 503, 504, 529]);
+
+/** Drain an error body so the keep-alive socket can be reused. */
+async function drainBody(response: Response): Promise<void> {
+  try {
+    await response.text();
+  } catch {
+    // The status is what callers act on; body failures stay silent.
+  }
+}
+
+/**
  * Single Jev evaluation round-trip with Zod validation at the boundary.
- * Retries 429/529 with exponential backoff (200ms, 800ms); every other
- * failure surfaces as JevError so callers can fail open or closed.
+ * Retries transient failures (429/502/503/504/529) with exponential
+ * backoff (200ms, 800ms); every other failure surfaces as JevError so
+ * callers can fail open or closed.
  */
 export async function evaluateJev(
+  state: string | Record<string, unknown>,
+  questions: Record<string, JevQuestion>,
+  config: Config,
+): Promise<JevResponse> {
+  if (!isJevConfigured(config)) {
+    return evaluateJevInner(state, questions, config);
+  }
+  try {
+    const result = await evaluateJevInner(state, questions, config);
+    recordJevOutcome(true);
+    return result;
+  } catch (error) {
+    recordJevOutcome(false);
+    throw error;
+  }
+}
+
+async function evaluateJevInner(
   state: string | Record<string, unknown>,
   questions: Record<string, JevQuestion>,
   config: Config,
@@ -158,15 +212,24 @@ export async function evaluateJev(
       lastError = error;
       continue;
     }
-    if (response.status === 429 || response.status === 529) {
-      lastError = new JevError(
-        "JEV_RATE_LIMITED",
-        response.status,
-        `Jev rate limited (attempt ${attempt + 1})`,
-      );
+    if (RETRYABLE_STATUS.has(response.status)) {
+      await drainBody(response);
+      lastError =
+        response.status === 429 || response.status === 529
+          ? new JevError(
+              "JEV_RATE_LIMITED",
+              response.status,
+              `Jev rate limited (attempt ${attempt + 1})`,
+            )
+          : new JevError(
+              "JEV_UNAVAILABLE",
+              502,
+              `Jev provider answered ${response.status} (attempt ${attempt + 1})`,
+            );
       continue;
     }
     if (!response.ok) {
+      await drainBody(response);
       throw new JevError(
         "JEV_UNAVAILABLE",
         502,
@@ -286,7 +349,9 @@ export function decidePreGate(
     };
   }
   const warnings: string[] = [];
-  if (gate.complexity >= 2.5) {
+  // Confidence-gated: a large-diagram guess the model is unsure about
+  // should not nag the user about Community node limits.
+  if (gate.complexity >= 2.5 && gate.complexityConfidence > 0.5) {
     warnings.push(
       `This looks like a large diagram and may exceed the Community limit of ${communityNodeLimit} nodes.`,
     );

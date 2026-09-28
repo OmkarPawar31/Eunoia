@@ -1,6 +1,7 @@
 import { Redis } from "ioredis";
 import type { Config } from "./config.js";
 import { resolveR2Config } from "./images.js";
+import { jevLastOutcome } from "./jev.js";
 
 export type CheckStatus = "ok" | "skipped" | "degraded" | "error";
 
@@ -30,6 +31,7 @@ export type HealthChecks = {
   checkRedis: () => Promise<DependencyCheck>;
   checkCompiler: () => Promise<DependencyCheck>;
   checkImageStorage?: () => Promise<DependencyCheck>;
+  checkJev?: () => Promise<DependencyCheck>;
 };
 
 const CHECK_TIMEOUT_MS = 2500;
@@ -175,13 +177,23 @@ export function imageStorageCheck(config: Config): DependencyCheck {
 
 /**
  * Jev needs no network probe: a live probe would spend budget on every
- * /readyz poll. Presence of the key decides the check; failures at request
- * time only ever degrade (fail-open) or 503 the AI route (fail-closed).
+ * /readyz poll. Presence of the key decides between ok/skipped, while the
+ * last configured round-trip outcome (tracked in jev.ts, sticky until the
+ * next success) surfaces recent outages as degraded. Degraded never takes
+ * the server out of rotation: fail-open still generates unguarded, and
+ * fail-closed surfaces per-request 503s on the AI route itself.
  */
 export function jevCheck(config: Config): DependencyCheck {
-  return config.jevApiKey
-    ? { status: 'ok', detail: 'Jev guardrails enabled' }
-    : { status: 'skipped', detail: 'JEV_API_KEY unset; guardrails skipped' };
+  if (!config.jevApiKey) {
+    return { status: 'skipped', detail: 'JEV_API_KEY unset; guardrails skipped' };
+  }
+  if (jevLastOutcome() === false) {
+    return {
+      status: 'degraded',
+      detail: 'Jev guardrails failing; see eunoia_jev_evaluations_total',
+    };
+  }
+  return { status: 'ok', detail: 'Jev guardrails enabled' };
 }
 
 export function summarizeReadiness(

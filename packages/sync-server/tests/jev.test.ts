@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { JevVerdictSchema } from "../src/api/schemas.js";
 import { loadConfig } from "../src/config.js";
+import { jevCheck } from "../src/health.js";
 import { createSyncServer, type SyncServer } from "../src/index.js";
-import { MemorySnapshotStore } from "../src/RoomLoader.js";
 import {
   buildPostQaQuestions,
   buildPreGateQuestions,
@@ -13,8 +13,11 @@ import {
   isJevConfigured,
   JevError,
   jevEndpoint,
+  recordJevOutcome,
+  resetJevHealth,
   resolveFailOpen,
 } from "../src/jev.js";
+import { MemorySnapshotStore } from "../src/RoomLoader.js";
 
 function jevConfig(overrides: Record<string, string> = {}) {
   return loadConfig({
@@ -173,10 +176,71 @@ describe("jev client", () => {
     expect(calls).toBe(2);
   });
 
+  test("retries a transient 503 then succeeds", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response("overloaded", { status: 503 })
+        : jevOkResponse();
+    }) as typeof fetch;
+    const response = await evaluateJev("x", buildPreGateQuestions(), jevConfig());
+    expect(response.model).toBe("jev-1.13.0");
+    expect(calls).toBe(2);
+  });
+
+  test("gives up after three persistent 503s", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response("down", { status: 503 });
+    }) as typeof fetch;
+    await expect(
+      evaluateJev("x", buildPreGateQuestions(), jevConfig()),
+    ).rejects.toMatchObject({ code: "JEV_UNAVAILABLE" });
+    expect(calls).toBe(3);
+  });
+
+  test("tolerates provider-added fields instead of failing validation", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          model: "jev-1.13.0",
+          request_id: "req_future",
+          answers: {
+            is_jailbreak: { type: "noul", noul: 0.05, explanation: "new" },
+            is_diagrammable: { type: "noul", noul: 0.95 },
+            complexity: {
+              type: "score",
+              score: 1.2,
+              legend: { "0": "trivial", "1": "focused" },
+              probabilities: { "0": 0.1, "1": 0.9 },
+              confidence: 0.8,
+              extra: true,
+            },
+          },
+          usage: { input_tokens: 100, output_tokens: 0, total_tokens: 100 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    const gate = await evaluatePreGate("web and database", jevConfig());
+    expect(gate.isJailbreak).toBeCloseTo(0.05);
+    expect(gate.isDiagrammable).toBeCloseTo(0.95);
+  });
+
   test("throws without a key", async () => {
     await expect(
       evaluateJev("x", buildPreGateQuestions(), loadConfig({ NODE_ENV: "test" })),
     ).rejects.toMatchObject({ code: "JEV_UNAVAILABLE" });
+  });
+
+  test("ignores low-confidence complexity guesses", () => {
+    const quiet = decidePreGate(
+      { isJailbreak: 0.05, isDiagrammable: 0.9, complexity: 2.8, complexityConfidence: 0.1 },
+      jevConfig(),
+      30,
+    );
+    expect(quiet).toEqual({ allowed: true, warnings: [] });
   });
 
   test("pre-gate and post-QA helpers parse their answers", async () => {
@@ -227,6 +291,34 @@ describe("JevVerdictSchema", () => {
         extra: true,
       }).success,
     ).toBe(false);
+  });
+
+  test("rejects matchesIntent outside the 0-2 score scale", () => {
+    expect(
+      JevVerdictSchema.safeParse({
+        matchesIntent: 3,
+        likelyValid: 0.9,
+        confidence: 0.8,
+        warnings: [],
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("jev health reporting", () => {
+  beforeEach(() => resetJevHealth());
+  afterEach(() => resetJevHealth());
+
+  test("skips without a key, ok when configured", () => {
+    expect(jevCheck(loadConfig({ NODE_ENV: "test" })).status).toBe("skipped");
+    expect(jevCheck(jevConfig()).status).toBe("ok");
+  });
+
+  test("degrades after a failed round-trip until the next success", () => {
+    recordJevOutcome(false);
+    expect(jevCheck(jevConfig())).toMatchObject({ status: "degraded" });
+    recordJevOutcome(true);
+    expect(jevCheck(jevConfig()).status).toBe("ok");
   });
 });
 
@@ -369,5 +461,85 @@ describe("POST /api/ai/generate with Jev", () => {
     }) as typeof fetch;
     const res = await generate(token, { prompt: "web and database" });
     expect(res.status).toBe(200);
+  });
+
+  test("skips post-QA when the pre-gate already failed", async () => {
+    const { token } = await register("jev-noqa@test.com");
+    let systemoneCalls = 0;
+    globalThis.fetch = (async (url: unknown, init?: unknown) => {
+      const target = String(url);
+      if (target.includes("/systemone")) {
+        systemoneCalls += 1;
+        return new Response("down", { status: 503 });
+      }
+      if (target.includes("/chat/completions")) return completion("a -> b");
+      return originalFetch(url as string, init as RequestInit);
+    }) as typeof fetch;
+    const res = await generate(token, { prompt: "web and database" });
+    expect(res.status).toBe(200);
+    // Pre-gate retries (3) only — post-QA is not attempted against a
+    // provider that just failed, instead of doubling outage latency.
+    expect(systemoneCalls).toBe(3);
+    expect(((await res.json()) as { quota: { used: number } }).quota.used).toBe(1);
+  });
+
+  test("still generates when post-QA alone fails", async () => {
+    const { token } = await register("jev-qafail@test.com");
+    let systemoneCalls = 0;
+    globalThis.fetch = (async (url: unknown, init?: unknown) => {
+      const target = String(url);
+      if (target.includes("/systemone")) {
+        systemoneCalls += 1;
+        // First call is the pre-gate (success); the rest are post-QA (down).
+        return systemoneCalls === 1
+          ? jevResponseFor(0.05, 0.95)
+          : new Response("down", { status: 503 });
+      }
+      if (target.includes("/chat/completions")) return completion("web -> db");
+      return originalFetch(url as string, init as RequestInit);
+    }) as typeof fetch;
+    const res = await generate(token, { prompt: "web and database" });
+    expect(res.status).toBe(200);
+    expect(systemoneCalls).toBe(4);
+    const body = (await res.json()) as { d2: string; jev?: unknown };
+    expect(body.d2).toBe("web -> db");
+    // No pre-gate warnings in this fixture, so no advisory block either.
+    expect(body.jev).toBeUndefined();
+  });
+
+  test("drops out-of-scale QA verdicts instead of serving them", async () => {
+    const { token } = await register("jev-scale@test.com");
+    globalThis.fetch = (async (url: unknown, init?: unknown) => {
+      const target = String(url);
+      if (target.includes("/systemone")) {
+        const state = JSON.parse(String((init as RequestInit).body));
+        const isPostQa =
+          typeof state.state === "object" && state.state !== null && "d2" in state.state;
+        if (!isPostQa) return jevResponseFor(0.05, 0.95);
+        return new Response(
+          JSON.stringify({
+            model: "jev-1.13.0",
+            answers: {
+              matches_intent: {
+                type: "score",
+                score: 5,
+                legend: { "0": "u", "1": "p", "2": "f" },
+                probabilities: { "0": 0, "1": 0, "2": 1 },
+                confidence: 0.9,
+              },
+              likely_valid: { type: "noul", noul: 0.95 },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (target.includes("/chat/completions")) return completion("web -> db");
+      return originalFetch(url as string, init as RequestInit);
+    }) as typeof fetch;
+    const res = await generate(token, { prompt: "web and database" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { d2: string; jev?: unknown };
+    expect(body.d2).toBe("web -> db");
+    expect(body.jev).toBeUndefined();
   });
 });

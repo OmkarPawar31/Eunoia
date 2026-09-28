@@ -1,5 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PrismaClient } from '@prisma/client';
 import pino from 'pino';
 import { WebSocketServer } from 'ws';
@@ -24,6 +26,7 @@ import {
   resolveR2Config,
   S3R2Client,
 } from './images.js';
+import { isJevConfigured, resolveFailOpen } from './jev.js';
 import { Metrics } from './metrics.js';
 import {
   MemorySnapshotStore,
@@ -171,6 +174,7 @@ export function createSyncServer(
     workspaces,
     aiUsage,
     audit,
+    log: logger,
   };
   const server = createServer((req, res) => {
     void handleApiRequest(req, res, manager, apiConfig, images, users, {
@@ -315,6 +319,16 @@ if (isMain) {
   if (!config.d2CompilerUrl) {
     logger.warn(
       'D2_COMPILER_URL is unset; /api/compile returns placeholder layouts. Start the compiler (docker compose up d2-compiler) and set D2_COMPILER_URL to enable real diagrams.',
+    );
+  }
+  if (config.aiApiKey && !isJevConfigured(config)) {
+    logger.warn(
+      'AI generation is enabled without JEV_API_KEY; Jev guardrails and QA are skipped.',
+    );
+  }
+  if (isJevConfigured(config) && resolveFailOpen(config)) {
+    logger.warn(
+      'Jev guardrails run fail-open; AI generations proceed unguarded when Jev is unreachable. Set JEV_FAIL_OPEN=false in production.',
     );
   }
   const app = createSyncServer(config);
