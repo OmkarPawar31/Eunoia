@@ -194,8 +194,8 @@ export function D2Panel({
             }
           >
             <option value="dagre">Dagre</option>
-            <option value="elk">ELK (Pro)</option>
-            <option value="tala">Tala (Pro)</option>
+            <option value="elk">ELK</option>
+            <option value="tala">Tala</option>
           </select>
         </label>
         <button

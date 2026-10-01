@@ -61,8 +61,8 @@ export class InvalidEngineError extends CompileRequestError {
 
 const LAYOUT_ENGINES: LayoutEngine[] = ["dagre", "elk", "tala"];
 
-/** ELK and TALA are Pro/Enterprise-only; Dagre is available on every tier. */
-const PRO_ENGINES: LayoutEngine[] = ["elk", "tala"];
+/** ELK and TALA temporarily free for all tiers (testing). */
+const PRO_ENGINES: LayoutEngine[] = [];
 
 const CompileResponseSchema = z
   .object({
