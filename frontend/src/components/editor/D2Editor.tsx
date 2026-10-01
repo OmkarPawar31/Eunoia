@@ -226,7 +226,9 @@ export const D2Editor: React.FC<D2EditorProps> = ({
           contextmenu: true,
           suggest: {
             showWords: false,
+            maxVisibleSuggestions: 8,
           },
+          fixedOverflowWidgets: false,
         }}
       />
     </div>

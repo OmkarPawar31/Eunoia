@@ -1,4 +1,14 @@
 import type { Monaco } from '@monaco-editor/react';
+import {
+  buildSuggestions,
+  collectDefinedIdentifiers,
+  D2_BOOLEANS,
+  D2_DIRECTIONS,
+  D2_KEYWORDS,
+  D2_SHAPES,
+  getCompletionContext,
+  type D2Suggestion,
+} from './d2Completion';
 
 /**
  * Registers the D2 language with Monaco Editor.
@@ -38,76 +48,20 @@ export function registerD2Language(monaco: Monaco) {
     wordPattern: /(-?\d*\.\d\w*)|([a-zA-Z_][\w\-.]*)|([a-zA-Z_]\w*)/,
   });
 
-  // Monarch tokenizer for D2 syntax
+  // Monarch tokenizer for D2 syntax. Word lists are shared with the
+  // completion model (`d2Completion.ts`) so highlighting and suggestions
+  // can never drift apart.
   monaco.languages.setMonarchTokensProvider('d2', {
     defaultToken: '',
     tokenPostfix: '.d2',
 
-    keywords: [
-      'shape',
-      'style',
-      'label',
-      'direction',
-      'link',
-      'tooltip',
-      'icon',
-      'constraint',
-      'near',
-      'width',
-      'height',
-      'top',
-      'bottom',
-      'left',
-      'right',
-      'source-arrowhead',
-      'target-arrowhead',
-      'opacity',
-      'fill',
-      'stroke',
-      'stroke-width',
-      'stroke-dash',
-      'font-size',
-      'font-color',
-      'bold',
-      'italic',
-      'underline',
-      'shadow',
-      'multiple',
-      'animated',
-      'border-radius',
-      '3d',
-      'double-border',
-    ],
+    keywords: [...D2_KEYWORDS],
 
-    shapes: [
-      'rectangle',
-      'square',
-      'page',
-      'parallelogram',
-      'document',
-      'cylinder',
-      'queue',
-      'package',
-      'step',
-      'callout',
-      'stored_data',
-      'person',
-      'diamond',
-      'oval',
-      'circle',
-      'hexagon',
-      'cloud',
-      'text',
-      'code',
-      'sql_table',
-      'class',
-      'sequence_diagram',
-      'image',
-    ],
+    shapes: [...D2_SHAPES],
 
-    directions: ['up', 'down', 'left', 'right'],
+    directions: [...D2_DIRECTIONS],
 
-    booleans: ['true', 'false'],
+    booleans: [...D2_BOOLEANS],
 
     tokenizer: {
       root: [
@@ -225,19 +179,51 @@ export function registerD2Language(monaco: Monaco) {
       'editorWidget.border': '#2A2A2A',
       'editorSuggestWidget.background': '#141414',
       'editorSuggestWidget.border': '#2A2A2A',
-      'editorSuggestWidget.selectedBackground': '#1E1E1E',
+      'editorSuggestWidget.foreground': '#ABB2BF',
+      'editorSuggestWidget.selectedForeground': '#FFFFFF',
+      'editorSuggestWidget.selectedBackground': '#2A3350',
+      'editorSuggestWidget.highlightForeground': '#61AFEF',
+      'editorSuggestWidget.focusHighlightForeground': '#7C8CFF',
+      'list.hoverBackground': '#1E1E1E',
+      'list.hoverForeground': '#FFFFFF',
+      'list.activeSelectionBackground': '#2A3350',
+      'list.activeSelectionForeground': '#FFFFFF',
+      'list.inactiveSelectionBackground': '#1E1E1E',
+      'list.inactiveSelectionForeground': '#ABB2BF',
+      'list.highlightForeground': '#61AFEF',
       'scrollbarSlider.background': '#2A2A2A80',
       'scrollbarSlider.hoverBackground': '#3B3F4A80',
       'scrollbarSlider.activeBackground': '#3B3F4AA0',
     },
   });
 
-  // Basic D2 autocompletions (registered once — duplicates would suggest
-  // everything twice).
+  // Context-aware D2 completions (registered once — duplicates would
+  // suggest everything twice). The suggestion model lives in
+  // `d2Completion.ts`; this is only the Monaco adapter.
   if (alreadyDone(monaco, 'completions')) {
     return;
   }
+  const kindFor = (
+    suggestion: D2Suggestion,
+  ): (typeof monaco.languages.CompletionItemKind)[keyof typeof monaco.languages.CompletionItemKind] => {
+    switch (suggestion.kind) {
+      case 'shape':
+        return monaco.languages.CompletionItemKind.Enum;
+      case 'keyword':
+        return monaco.languages.CompletionItemKind.Keyword;
+      case 'property':
+        return monaco.languages.CompletionItemKind.Property;
+      case 'value':
+        return monaco.languages.CompletionItemKind.Value;
+      case 'identifier':
+        return monaco.languages.CompletionItemKind.Variable;
+      case 'snippet':
+        return monaco.languages.CompletionItemKind.Snippet;
+    }
+  };
   monaco.languages.registerCompletionItemProvider('d2', {
+    // Re-trigger suggestions right after `.` (`style.|`) and `:` (`shape: |`).
+    triggerCharacters: ['.', ':'],
     provideCompletionItems: (
       model: Parameters<
         Parameters<
@@ -250,6 +236,16 @@ export function registerD2Language(monaco: Monaco) {
         >[1]['provideCompletionItems']
       >[1],
     ) => {
+      const lines: string[] = [];
+      for (let i = 1; i < position.lineNumber; i++) {
+        lines.push(model.getLineContent(i));
+      }
+      lines.push(model.getLineContent(position.lineNumber));
+      const context = getCompletionContext(
+        lines,
+        position.lineNumber - 1,
+        position.column,
+      );
       const word = model.getWordUntilPosition(position);
       const range = {
         startLineNumber: position.lineNumber,
@@ -257,109 +253,26 @@ export function registerD2Language(monaco: Monaco) {
         startColumn: word.startColumn,
         endColumn: word.endColumn,
       };
-
-      const suggestions = [
-        // Shape types
-        ...[
-          'rectangle',
-          'square',
-          'cylinder',
-          'circle',
-          'diamond',
-          'oval',
-          'hexagon',
-          'cloud',
-          'person',
-          'package',
-          'queue',
-          'sql_table',
-          'class',
-          'code',
-          'text',
-          'sequence_diagram',
-        ].map((shape) => ({
-          label: shape,
-          kind: monaco.languages.CompletionItemKind.Enum,
-          insertText: shape,
-          detail: 'D2 Shape',
+      const suggestions = buildSuggestions(
+        context,
+        collectDefinedIdentifiers(model.getValue()),
+      );
+      return {
+        suggestions: suggestions.map((suggestion) => ({
+          label: suggestion.label,
+          kind: kindFor(suggestion),
+          insertText: suggestion.insertText,
+          insertTextRules: suggestion.isSnippet
+            ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+            : undefined,
+          // No `detail`: in this narrow pane the detail column squeezes
+          // labels down to a character or two. Kind is still visible via
+          // the icon; docs remain in the details panel.
+          documentation: suggestion.documentation,
+          sortText: suggestion.sortText,
           range,
         })),
-        // Style keywords
-        ...[
-          'style',
-          'shape',
-          'label',
-          'direction',
-          'link',
-          'tooltip',
-          'icon',
-          'near',
-          'width',
-          'height',
-        ].map((kw) => ({
-          label: kw,
-          kind: monaco.languages.CompletionItemKind.Keyword,
-          insertText: kw,
-          detail: 'D2 Keyword',
-          range,
-        })),
-        // Style properties
-        ...[
-          'fill',
-          'stroke',
-          'stroke-width',
-          'stroke-dash',
-          'opacity',
-          'font-size',
-          'font-color',
-          'shadow',
-          'bold',
-          'italic',
-          'underline',
-          'border-radius',
-          'animated',
-          '3d',
-          'double-border',
-          'multiple',
-        ].map((prop) => ({
-          label: prop,
-          kind: monaco.languages.CompletionItemKind.Property,
-          insertText: prop,
-          detail: 'D2 Style Property',
-          range,
-        })),
-        // Connectors snippet
-        {
-          label: 'connection (->)',
-          kind: monaco.languages.CompletionItemKind.Snippet,
-          insertText: '${1:source} -> ${2:target}: ${3:label}',
-          insertTextRules:
-            monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-          detail: 'D2 Connection',
-          range,
-        },
-        {
-          label: 'bidirectional (<->)',
-          kind: monaco.languages.CompletionItemKind.Snippet,
-          insertText: '${1:source} <-> ${2:target}: ${3:label}',
-          insertTextRules:
-            monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-          detail: 'D2 Bidirectional Connection',
-          range,
-        },
-        // Container snippet
-        {
-          label: 'container',
-          kind: monaco.languages.CompletionItemKind.Snippet,
-          insertText: '${1:name}: {\n  ${2:child1}\n  ${3:child2}\n}',
-          insertTextRules:
-            monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-          detail: 'D2 Container',
-          range,
-        },
-      ];
-
-      return { suggestions };
+      };
     },
   });
 }

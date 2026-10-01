@@ -1101,6 +1101,26 @@ path.canvas-grid {
   flex: 1;
 }
 
+/* Keep Monaco's suggest widget inside the narrow D2 pane. The panel has
+   overflow: hidden so the popup must never exceed the panel width. */
+.code-editor-wrap .monaco-editor .suggest-details {
+  max-width: 100% !important;
+}
+
+.code-editor-wrap .monaco-editor .suggest-widget {
+  max-width: 340px !important;
+  left: 0 !important;
+}
+
+.code-editor-wrap .monaco-editor .suggest-widget .monaco-list .monaco-list-row {
+  padding-right: 8px;
+}
+
+.code-editor-wrap .monaco-editor .editor-widget.suggest-widget {
+  /* Prevent the widget from overflowing the panel edge */
+  transform: none !important;
+}
+
 .code-panel-footer {
   min-height: 60px;
   justify-content: space-between;

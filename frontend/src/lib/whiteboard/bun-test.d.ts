@@ -9,9 +9,11 @@ declare module 'bun:test' {
     toEqual(expected: unknown): void;
     toBeNull(): void;
     toBeGreaterThan(expected: number): void;
+    toContain(expected: unknown): void;
     toMatchObject(expected: unknown): void;
     not: {
       toBeNull(): void;
+      toContain(expected: unknown): void;
     };
   };
 }
