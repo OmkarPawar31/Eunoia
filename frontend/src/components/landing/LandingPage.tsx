@@ -585,7 +585,7 @@ export function LandingPage() {
           <a href="/pricing">Plans</a>
           <a href="#teams">Workspaces</a>
           <a href="/status">Status</a>
-          <a href="#resources">
+          <a href="/docs">
             Docs <ChevronDown size={16} />
           </a>
         </nav>
@@ -593,12 +593,17 @@ export function LandingPage() {
         <div className="eunoia-actions">
           <a
             className="eunoia-nav-icon"
-            href="#resources"
+            href="/docs#community"
             aria-label="Eunoia community"
           >
             <MessageCircle size={17} />
           </a>
-          <a className="eunoia-nav-github" href="#resources">
+          <a
+            className="eunoia-nav-github"
+            href="https://github.com/lavya30/Eunoia"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             <Github size={16} /> Open core
           </a>
           <a className="eunoia-sign-in" href="/login">
@@ -629,7 +634,7 @@ export function LandingPage() {
           <div className="eunoia-hero__copy flex flex-col items-center">
             <BlurFade inView>
               <a
-                href="#resources"
+                href="/docs"
                 className="mb-6 inline-flex items-center gap-2 rounded-full border border-[#6965DB]/25 bg-white/80 px-4 py-1.5 text-[13px] font-bold text-[#292359] shadow-sm backdrop-blur transition hover:border-[#6965DB]/50"
               >
                 <span className="relative flex size-2">
@@ -675,7 +680,9 @@ export function LandingPage() {
                   </ShimmerButton>
                 </CoolMode>
                 <a
-                  href="#resources"
+                  href="https://github.com/lavya30/Eunoia"
+                  target="_blank"
+                  rel="noopener noreferrer"
                   className="eunoia-button eunoia-button--secondary"
                 >
                   <Github size={16} /> Star on GitHub
@@ -933,17 +940,17 @@ export function LandingPage() {
                 {
                   title: 'Service map',
                   text: 'Make dependencies and boundaries easier to see.',
-                  href: '#resources',
+                  href: '/docs#quickstart',
                 },
                 {
                   title: 'D2 diagram',
                   text: 'Turn declarative structure into editable canvas objects.',
-                  href: '#resources',
+                  href: '/docs#d2-syntax',
                 },
                 {
                   title: 'Incident room',
                   text: 'Keep the live problem, owners, and next actions in one place.',
-                  href: '#resources',
+                  href: '/docs#shortcuts-table',
                 },
               ].map((card, i) => (
                 <BlurFade key={card.title} delay={0.08 * i} inView>
@@ -1193,7 +1200,7 @@ export function LandingPage() {
                   Start with a flexible architecture canvas for spatial
                   thinking, clear diagrams, and local workflows.
                 </p>
-                <Button href="#resources">Explore community</Button>
+                <Button href="/docs#community">Explore community</Button>
               </MagicCard>
             </BlurFade>
             <BlurFade delay={0.15} inView>
@@ -1239,6 +1246,7 @@ export function LandingPage() {
         </div>
         <span>Eunoia Architecture Whiteboard</span>
         <nav aria-label="Footer" style={{ display: 'flex', gap: 16 }}>
+          <a href="/docs">Docs</a>
           <a href="/pricing">Pricing</a>
           <a href="/billing">Billing</a>
           <a href="/board">Board</a>

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import { usePathname } from 'next/navigation';
 import Lenis, { type LenisOptions } from 'lenis';
 
 let lenis: Lenis | null = null;
@@ -35,17 +36,30 @@ const lenisOptions: LenisOptions = {
 
 /**
  * Mount once in the root layout to enable Lenis smooth scrolling
- * site-wide. Skipped for users who prefer reduced motion.
+ * site-wide. Skipped on /docs (instant native scrolling) and for users
+ * who prefer reduced motion.
  */
 export function SmoothScroll() {
+  const pathname = usePathname();
+
   useEffect(() => {
+    // Disable any smoothing on docs page
+    if (pathname.startsWith('/docs') || pathname.startsWith('/board')) {
+      if (lenis) {
+        lenis.destroy();
+        lenis = null;
+      }
+      return;
+    }
+
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     lenis = new Lenis(lenisOptions);
     return () => {
       lenis?.destroy();
       lenis = null;
     };
-  }, []);
+  }, [pathname]);
 
   return null;
 }
+

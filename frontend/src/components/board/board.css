@@ -26,7 +26,8 @@
   overflow: hidden;
   background: var(--board-shell);
   color: #f5f4f0;
-  font-family: 'Nunito Sans', 'Avenir Next', system-ui, sans-serif;
+  font-family:
+    var(--font-geist-sans), 'Nunito Sans', 'Avenir Next', system-ui, sans-serif;
 }
 
 .eunoia-board-shell button,
