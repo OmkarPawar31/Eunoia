@@ -145,6 +145,7 @@ import { RemoteCursors } from './RemoteCursors';
 import { RoomSettingsDialog } from './RoomSettingsDialog';
 import { HistoryPanel } from './HistoryPanel';
 import { SearchPalette } from './SearchPalette';
+import { ShortcutsDialog } from './ShortcutsDialog';
 import { contentBounds } from '@/lib/whiteboard/export/bounds';
 import {
   cloneBoardSvg,
@@ -1260,6 +1261,7 @@ export function WhiteboardPage({
   const [showRoomSettings, setShowRoomSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
 
@@ -2832,6 +2834,12 @@ export function WhiteboardPage({
       if (!canvasRef.current || isAuxClick(event)) return;
       // Don't let a canvas drag extend a browser text selection.
       clearNativeSelection();
+      // Return focus to the canvas: toolbar buttons keep DOM focus after
+      // being clicked, which would otherwise turn Space into a button
+      // re-trigger instead of pan.
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
       event.preventDefault();
       viewportRectRef.current = canvasRef.current.getBoundingClientRect();
       const screenPoint = pointerToViewportPoint(
@@ -2989,6 +2997,10 @@ export function WhiteboardPage({
     (event: ReactPointerEvent<SVGSVGElement>) => {
       if (isAuxClick(event)) return;
       clearNativeSelection();
+      // Return focus to the canvas (see handleElementPointerDown).
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
       event.preventDefault();
       viewportRectRef.current = event.currentTarget.getBoundingClientRect();
       const screenPoint = pointerToViewportPoint(
@@ -4414,6 +4426,14 @@ export function WhiteboardPage({
       if (isEditableTarget(event.target)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
+        if (showShortcuts) {
+          setShowShortcuts(false);
+          return;
+        }
+        if (showSearch) {
+          setShowSearch(false);
+          return;
+        }
         if (exportMenuOpen) {
           setExportMenuOpen(false);
           return;
@@ -4474,6 +4494,14 @@ export function WhiteboardPage({
           prev === 'dots' ? 'lines' : prev === 'lines' ? 'none' : 'dots',
         );
       }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
+        event.preventDefault();
+        setShowSearch((prev) => !prev);
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key === '/') {
+        event.preventDefault();
+        setShowShortcuts((prev) => !prev);
+      }
       if (
         !locked &&
         (event.key === 'Delete' || event.key === 'Backspace') &&
@@ -4501,19 +4529,28 @@ export function WhiteboardPage({
         });
       }
       // Tool & Layer shortcuts (only when no modifier keys or with shift).
-      // Skip while focus sits on a button/link so Space/Enter keep working.
+      // Letter/punctuation keys never activate buttons or links natively,
+      // so they stay usable as shortcuts even while a toolbar control holds
+      // focus (the common state right after clicking a tool). Only
+      // Space/Enter keep native control behavior for keyboard accessibility.
       const target = event.target instanceof HTMLElement ? event.target : null;
       const focusOnControl =
         target !== null &&
         (target.tagName === 'BUTTON' ||
           target.tagName === 'A' ||
           target.getAttribute('role') === 'button');
+      const nativeControlKey =
+        focusOnControl && (event.key === ' ' || event.key === 'Enter');
       if (
         !event.metaKey &&
         !event.ctrlKey &&
         !event.altKey &&
-        !focusOnControl
+        !nativeControlKey
       ) {
+        // Release stuck toolbar focus: without this, clicking any tool
+        // button leaves it focused and future Space presses would re-trigger
+        // the button instead of panning.
+        if (focusOnControl) target?.blur();
         switch (event.key.toLowerCase()) {
           case 'v':
             selectTool('select');
@@ -4547,6 +4584,9 @@ export function WhiteboardPage({
             break;
           case 'n':
             selectTool('note');
+            break;
+          case '?':
+            setShowShortcuts((prev) => !prev);
             break;
           case ']':
             moveSelectedLayer(event.shiftKey ? 'front' : 'forward');
@@ -4606,6 +4646,8 @@ export function WhiteboardPage({
     selectAllIds,
     selectTool,
     selectedIds,
+    showSearch,
+    showShortcuts,
     undo,
   ]);
 
@@ -6143,7 +6185,8 @@ export function WhiteboardPage({
               className="help-button"
               type="button"
               aria-label="Keyboard shortcuts"
-              title="Keyboard shortcuts"
+              title="Keyboard shortcuts (?)"
+              onClick={() => setShowShortcuts(true)}
             >
               ?
             </button>
@@ -7058,6 +7101,9 @@ export function WhiteboardPage({
             }
           }}
         />
+      ) : null}
+      {showShortcuts ? (
+        <ShortcutsDialog onClose={() => setShowShortcuts(false)} />
       ) : null}
     </div>
   );

@@ -21,6 +21,10 @@ export function ToolButton({
       aria-label={label}
       aria-pressed={active}
       title={label}
+      // Keep focus off the toolbar on mouse clicks so board shortcuts keep
+      // working right after picking a tool. Keyboard Tab-focus and
+      // Space/Enter activation are unaffected.
+      onMouseDown={(event) => event.preventDefault()}
       onClick={onClick}
     >
       {children}
@@ -47,6 +51,10 @@ export function FloatingToolButton({
       aria-label={label}
       aria-pressed={active}
       title={label}
+      // Keep focus off the toolbar on mouse clicks so board shortcuts keep
+      // working right after picking a tool. Keyboard Tab-focus and
+      // Space/Enter activation are unaffected.
+      onMouseDown={(event) => event.preventDefault()}
       onClick={onClick}
     >
       {children}

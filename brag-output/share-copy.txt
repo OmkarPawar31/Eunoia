@@ -1,0 +1,1 @@
+Eunoia: write D2 code, watch it become a live diagram on canvas. 60 FPS infinite canvas. Sub-50ms Yjs sync. Architecture whiteboard, made simple.
